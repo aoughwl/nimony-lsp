@@ -1,0 +1,41 @@
+{
+  "comments": {
+    "lineComment": "#",
+    "blockComment": ["#[", "]#"]
+  },
+  "brackets": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"]
+  ],
+  "autoClosingPairs": [
+    { "open": "{", "close": "}" },
+    { "open": "[", "close": "]" },
+    { "open": "(", "close": ")" },
+    { "open": "{.", "close": ".}" },
+    { "open": "\"", "close": "\"", "notIn": ["string"] },
+    { "open": "'", "close": "'", "notIn": ["string", "comment"] }
+  ],
+  "surroundingPairs": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"],
+    ["\"", "\""],
+    ["'", "'"]
+  ],
+  "wordPattern": "[A-Za-z\\x{80}-\\x{FFFF}][A-Za-z0-9_\\x{80}-\\x{FFFF}]*",
+  "indentationRules": {
+    "increaseIndentPattern": "(:|=)\\s*(#.*)?$|^\\s*(if|elif|else|case|of|while|for|try|except|finally|defer|block|when|proc|func|method|iterator|converter|macro|template|type|const|let|var|object|enum|tuple|import|export|include)\\b.*(:|=|object|enum|tuple)\\s*(#.*)?$|(\\(|\\[)\\s*(#.*)?$",
+    "decreaseIndentPattern": "^\\s*(else|elif|of|except|finally)\\b.*:?\\s*(#.*)?$"
+  },
+  "onEnterRules": [
+    {
+      "beforeText": "^\\s*##\\s.*$",
+      "action": { "indent": "none", "appendText": "## " }
+    },
+    {
+      "beforeText": "^\\s*##$",
+      "action": { "indent": "none", "appendText": "## " }
+    }
+  ]
+}

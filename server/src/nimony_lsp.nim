@@ -1,0 +1,172 @@
+## nimony-lsp — entry point.
+##
+## Blocking stdio loop: read a framed JSON-RPC message, dispatch, write the
+## response. Feature handlers live in `features/` and the `driver/` layer; this
+## module owns lifecycle + document synchronization and routes requests.
+
+import std/[json, options, os, tables]
+import lsp/[jsonrpc, protocol, uris]
+import server/[state, documents]
+import driver/[diagnostics, idetools, nifindex]
+
+const
+  ServerName = "nimony-lsp"
+  ServerVersion = "0.1.0"
+
+var gState = newServerState()
+var gOut = stdout
+
+proc publishDiagnostics(uri: string; diags: seq[Diagnostic]) =
+  let params = %*{"uri": uri, "diagnostics": toJsonArray(diags)}
+  writeMessage(gOut, notification("textDocument/publishDiagnostics", params))
+
+proc refreshDiagnostics(uri: string) =
+  ## Run nimony check for the document and publish results for every file
+  ## the checker reported on (plus an explicit clear for `uri`).
+  let path = filePath(uri)
+  if path.len == 0 or not path.fileExists: return
+  let byFile = computeDiagnostics(gState.config, path)
+  # Always clear the primary file first so stale diagnostics disappear.
+  var reported = initTable[string, bool]()
+  for absPath, diags in byFile:
+    publishDiagnostics(pathToUri(absPath), diags)
+    reported[pathToUri(absPath)] = true
+  if not reported.hasKey(uri):
+    publishDiagnostics(uri, @[])
+
+# --------------------------------------------------------------------------
+# request handlers
+# --------------------------------------------------------------------------
+
+proc handleInitialize(params: JsonNode): JsonNode =
+  gState.rootUri = params{"rootUri"}.getStr("")
+  if gState.rootUri.len > 0:
+    gState.config.projectRoot = filePath(gState.rootUri)
+  # initializationOptions overrides
+  let opts = params{"initializationOptions"}
+  if opts != nil:
+    let np = opts{"nimonyPath"}.getStr("")
+    if np.len > 0: gState.config.nimonyExe = np
+    let ep = opts{"extraPaths"}
+    if ep != nil and ep.kind == JArray:
+      for x in ep: gState.config.extraPaths.add(x.getStr)
+  gState.initialized = true
+  result = %*{
+    "capabilities": {
+      "textDocumentSync": {"openClose": true, "change": 1, "save": {"includeText": false}},
+      "definitionProvider": true,
+      "referencesProvider": true,
+      "hoverProvider": true,
+      "documentSymbolProvider": true,
+      "completionProvider": {"triggerCharacters": [".", "("]},
+      "workspaceSymbolProvider": false
+    },
+    "serverInfo": {"name": ServerName, "version": ServerVersion}
+  }
+
+proc handleDefinition(params: JsonNode): JsonNode =
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
+  if doc == nil: return newJNull()
+  let locs = idetools.definition(gState.config, filePath(uri), positionParam(params))
+  if locs.len == 0: newJNull() else: toJsonArray(locs)
+
+proc handleReferences(params: JsonNode): JsonNode =
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
+  if doc == nil: return newJArray()
+  let locs = idetools.references(gState.config, filePath(uri), positionParam(params))
+  toJsonArray(locs)
+
+proc handleHover(params: JsonNode): JsonNode =
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
+  if doc == nil: return newJNull()
+  let h = nifindex.hoverAt(gState.config, filePath(uri), positionParam(params))
+  if h.isSome: %h.get else: newJNull()
+
+proc handleDocumentSymbol(params: JsonNode): JsonNode =
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
+  if doc == nil: return newJArray()
+  toJsonArray(nifindex.documentSymbols(gState.config, filePath(uri)))
+
+proc handleCompletion(params: JsonNode): JsonNode =
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
+  if doc == nil: return newJArray()
+  let items = nifindex.completions(gState.config, filePath(uri), positionParam(params))
+  toJsonArray(items)
+
+# --------------------------------------------------------------------------
+# notification handlers (document sync)
+# --------------------------------------------------------------------------
+
+proc handleDidOpen(params: JsonNode) =
+  let td = params{"textDocument"}
+  if td == nil: return
+  let uri = td{"uri"}.getStr
+  gState.openDoc(uri, td{"languageId"}.getStr("nim"),
+                 td{"version"}.getInt(0), td{"text"}.getStr(""))
+  refreshDiagnostics(uri)
+
+proc handleDidChange(params: JsonNode) =
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
+  if doc == nil: return
+  let changes = params{"contentChanges"}
+  if changes != nil and changes.kind == JArray and changes.len > 0:
+    # full sync: last change carries the whole document
+    let last = changes[changes.len - 1]
+    doc.update(params{"textDocument", "version"}.getInt(doc.version + 1),
+               last{"text"}.getStr(""))
+
+proc handleDidSave(params: JsonNode) =
+  refreshDiagnostics(textDocumentUri(params))
+
+proc handleDidClose(params: JsonNode) =
+  gState.closeDoc(textDocumentUri(params))
+
+# --------------------------------------------------------------------------
+# dispatch
+# --------------------------------------------------------------------------
+
+proc dispatchRequest(m: Message): JsonNode =
+  case m.meth
+  of "initialize": response(m.id, handleInitialize(m.params))
+  of "shutdown":
+    gState.shutdownRequested = true
+    response(m.id, newJNull())
+  of "textDocument/definition": response(m.id, handleDefinition(m.params))
+  of "textDocument/references": response(m.id, handleReferences(m.params))
+  of "textDocument/hover": response(m.id, handleHover(m.params))
+  of "textDocument/documentSymbol": response(m.id, handleDocumentSymbol(m.params))
+  of "textDocument/completion": response(m.id, handleCompletion(m.params))
+  else: errorResponse(m.id, MethodNotFound, "unhandled method: " & m.meth)
+
+proc dispatchNotification(m: Message) =
+  case m.meth
+  of "initialized": discard
+  of "exit": quit(if gState.shutdownRequested: 0 else: 1)
+  of "textDocument/didOpen": handleDidOpen(m.params)
+  of "textDocument/didChange": handleDidChange(m.params)
+  of "textDocument/didSave": handleDidSave(m.params)
+  of "textDocument/didClose": handleDidClose(m.params)
+  else: discard
+
+proc main() =
+  while true:
+    let mo = readMessage(stdin)
+    if mo.isNone: break        # EOF
+    let m = mo.get
+    if m.isNotification:
+      dispatchNotification(m)
+    elif m.isRequest:
+      if not gState.initialized and m.meth != "initialize":
+        writeMessage(gOut, errorResponse(m.id, ServerNotInitialized, "server not initialized"))
+        continue
+      writeMessage(gOut, dispatchRequest(m))
+    # responses from client (to our requests) are ignored for now
+
+when isMainModule:
+  main()
