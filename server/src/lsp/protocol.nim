@@ -128,6 +128,33 @@ type
     paddingLeft*: bool
     paddingRight*: bool
 
+  # ---- folding ----
+  FoldingRange* = object
+    startLine*, endLine*: int
+    kind*: string             ## "comment" | "imports" | "region"; omitted if ""
+
+  # ---- selection range (recursive, outer-to-inner via parent links) ----
+  SelectionRange* = ref object
+    `range`*: Range
+    parent*: SelectionRange
+
+  # ---- call hierarchy ----
+  CallHierarchyItem* = object
+    name*: string
+    kind*: SymbolKind
+    detail*: string
+    uri*: string
+    `range`*: Range
+    selectionRange*: Range
+
+  CallHierarchyIncomingCall* = object
+    `from`*: CallHierarchyItem
+    fromRanges*: seq[Range]
+
+  CallHierarchyOutgoingCall* = object
+    to*: CallHierarchyItem
+    fromRanges*: seq[Range]
+
 const
   ## Fixed legend shared by the semanticTokens capability and semtokens.nim.
   ## Producers MUST emit indices into these two arrays.
@@ -245,6 +272,30 @@ proc `%`*(h: InlayHint): JsonNode =
   if h.paddingLeft: result["paddingLeft"] = %true
   if h.paddingRight: result["paddingRight"] = %true
 
+proc `%`*(f: FoldingRange): JsonNode =
+  result = %*{"startLine": f.startLine, "endLine": f.endLine}
+  if f.kind.len > 0: result["kind"] = %f.kind
+
+proc `%`*(s: SelectionRange): JsonNode =
+  if s == nil: return newJNull()
+  result = %*{"range": %s.`range`}
+  if s.parent != nil: result["parent"] = %s.parent
+
+proc `%`*(it: CallHierarchyItem): JsonNode =
+  result = %*{"name": it.name, "kind": ord(it.kind), "uri": it.uri,
+              "range": %it.`range`, "selectionRange": %it.selectionRange}
+  if it.detail.len > 0: result["detail"] = %it.detail
+
+proc `%`*(c: CallHierarchyIncomingCall): JsonNode =
+  var fr = newJArray()
+  for r in c.fromRanges: fr.add(%r)
+  %*{"from": %c.`from`, "fromRanges": fr}
+
+proc `%`*(c: CallHierarchyOutgoingCall): JsonNode =
+  var fr = newJArray()
+  for r in c.fromRanges: fr.add(%r)
+  %*{"to": %c.to, "fromRanges": fr}
+
 proc toJsonArray*[T](xs: seq[T]): JsonNode =
   result = newJArray()
   for x in xs: result.add(%x)
@@ -286,3 +337,25 @@ proc queryParam*(params: JsonNode): string =
 proc rangeParam*(params: JsonNode): Range =
   ## params.range (for inlay hints / range requests)
   getRange(params{"range"})
+
+proc selectionPositions*(params: JsonNode): seq[Position] =
+  ## params.positions (for textDocument/selectionRange)
+  result = @[]
+  if params == nil: return
+  let ps = params{"positions"}
+  if ps != nil and ps.kind == JArray:
+    for p in ps: result.add getPosition(p)
+
+proc callHierarchyItemParam*(params: JsonNode): CallHierarchyItem =
+  ## params.item (for callHierarchy/incomingCalls & outgoingCalls)
+  if params == nil: return
+  let it = params{"item"}
+  if it == nil: return
+  result.name = it{"name"}.getStr("")
+  result.uri = it{"uri"}.getStr("")
+  result.detail = it{"detail"}.getStr("")
+  let k = it{"kind"}.getInt(12)
+  if k >= ord(low(SymbolKind)) and k <= ord(high(SymbolKind)):
+    result.kind = SymbolKind(k)
+  result.`range` = getRange(it{"range"})
+  result.selectionRange = getRange(it{"selectionRange"})
