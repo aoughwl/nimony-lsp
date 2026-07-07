@@ -208,6 +208,100 @@ proc documentSymbols*(cfg: Config; file: string): seq[DocumentSymbol] =
 # hoverAt
 # --------------------------------------------------------------------------
 
+const IdChars = {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+
+proc leadingWs(s: string): int =
+  result = 0
+  while result < s.len and s[result] in {' ', '\t'}: inc result
+
+proc identPrefix(s: string): string =
+  ## Leading identifier token of a (stripped) line, e.g. "proc" / "type".
+  var i = 0
+  while i < s.len and s[i] in IdChars: inc i
+  result = s[0 ..< i]
+
+proc parenBalance(s: string): int =
+  for ch in s:
+    if ch == '(': inc result
+    elif ch == ')': dec result
+
+proc collectSignature(lines: seq[string]; idx: int): (string, int) =
+  ## Assemble a (possibly multi-line) declaration signature starting at `idx`.
+  ## For procs with wrapping params: continue while parens are unbalanced.
+  ## For object/enum/tuple types: include the indented body block.
+  ## Returns (dedented signature text, index of last consumed line).
+  let first = lines[idx]
+  let base = leadingWs(first)
+  let head = first.strip()
+  let kw = identPrefix(head)
+  let procLike = kw in ["proc", "func", "method", "iterator",
+                        "converter", "template", "macro"]
+  let isType = kw == "type" or head.contains("= object") or
+               head.contains("= enum") or head.contains("= ref object") or
+               head.contains("= tuple") or head.contains("= object)") or
+               head.endsWith("= object") or head.endsWith("= enum")
+  var outLines = @[first]
+  var last = idx
+  if procLike:
+    var depth = parenBalance(first)
+    var guard = 0
+    while depth > 0 and last + 1 < lines.len and guard < 16:
+      inc last; inc guard
+      outLines.add lines[last]
+      depth += parenBalance(lines[last])
+  elif isType:
+    var guard = 0
+    while last + 1 < lines.len and guard < 24:
+      let nxt = lines[last + 1]
+      if nxt.strip().len == 0: break
+      if leadingWs(nxt) <= base: break
+      inc last; inc guard
+      outLines.add nxt
+  # Dedent by the declaration's own indentation.
+  var res: seq[string] = @[]
+  for ln in outLines:
+    if base > 0 and ln.len >= base and ln[0 ..< base].strip().len == 0:
+      res.add ln[base .. ^1].strip(leading = false)
+    else:
+      res.add ln.strip(leading = false)
+  var sig = res.join("\n").strip(leading = false)
+  if sig.endsWith("="):
+    sig = sig[0 ..< sig.len - 1].strip(leading = false)
+  result = (sig, last)
+
+proc stripDocMarker(s: string): string =
+  var t = s.strip()
+  if t.startsWith("##"):
+    t = t[2 .. ^1]
+    if t.startsWith(" "): t = t[1 .. ^1]
+  result = t
+
+proc collectDoc(lines: seq[string]; declIdx, sigEnd: int): string =
+  ## Doc comments are contiguous `##` lines immediately AFTER the signature
+  ## block (indented body) or immediately BEFORE the declaration.
+  var after: seq[string] = @[]
+  var i = sigEnd + 1
+  while i < lines.len and lines[i].strip().startsWith("##"):
+    after.add stripDocMarker(lines[i]); inc i
+  if after.len > 0:
+    return after.join("\n").strip()
+  var before: seq[string] = @[]
+  var j = declIdx - 1
+  while j >= 0 and lines[j].strip().startsWith("##"):
+    before.insert(stripDocMarker(lines[j]), 0); dec j
+  result = before.join("\n").strip()
+
+proc hoverSingleLine(lines: seq[string]; lineIdx: int): Option[Hover] =
+  ## Original behavior: a single fenced source line. Used as the safety net.
+  if lineIdx < 0 or lineIdx >= lines.len: return none(Hover)
+  var sig = lines[lineIdx].strip()
+  if sig.endsWith("="):
+    sig = sig[0 ..< sig.len - 1].strip()
+  if sig.len == 0: return none(Hover)
+  let md = "```nim\n" & sig & "\n```"
+  return some(Hover(contents: MarkupContent(kind: "markdown", value: md),
+                    `range`: none(Range)))
+
 proc hoverAt*(cfg: Config; file: string; pos: Position): Option[Hover] =
   try:
     let locs = idetools.definition(cfg, file, pos)
@@ -219,14 +313,19 @@ proc hoverAt*(cfg: Config; file: string; pos: Position): Option[Hover] =
     let content = readFile(defPath)
     let lines = content.splitLines
     if lineIdx < 0 or lineIdx >= lines.len: return none(Hover)
-    var sig = lines[lineIdx].strip()
-    # Trim a trailing `=` (proc/body separator) for a cleaner signature line.
-    if sig.endsWith("="):
-      sig = sig[0 ..< sig.len-1].strip()
-    if sig.len == 0: return none(Hover)
-    let md = "```nim\n" & sig & "\n```"
-    return some(Hover(contents: MarkupContent(kind: "markdown", value: md),
-                      `range`: none(Range)))
+    # Enriched path: multi-line signature + doc comment. Any failure falls
+    # back to the original single-line behavior.
+    try:
+      let (sig, sigEnd) = collectSignature(lines, lineIdx)
+      if sig.len == 0: return hoverSingleLine(lines, lineIdx)
+      let doc = collectDoc(lines, lineIdx, sigEnd)
+      var md = "```nim\n" & sig & "\n```"
+      if doc.len > 0:
+        md.add "\n\n" & doc
+      return some(Hover(contents: MarkupContent(kind: "markdown", value: md),
+                        `range`: none(Range)))
+    except CatchableError:
+      return hoverSingleLine(lines, lineIdx)
   except CatchableError:
     return none(Hover)
 
@@ -290,8 +389,197 @@ proc addImportedExports(cfg: Config; buf: var TokenBuf;
     except CatchableError:
       continue
 
-proc completions*(cfg: Config; file: string; pos: Position): seq[CompletionItem] =
+# --------------------------------------------------------------------------
+# Dot-context member completion
+# --------------------------------------------------------------------------
+
+const VarTags = ["let", "var", "glet", "gvar", "tlet", "tvar", "cursor", "const"]
+const RoutineTags = ["proc", "func", "method", "template", "macro",
+                     "converter", "iterator"]
+
+proc typeSlotName(start: Cursor): string =
+  ## Given a cursor at a var/param ParLe, return the demangled name of its
+  ## declared TYPE (slot layout: symdef, export, pragmas, TYPE, value).
+  result = ""
+  var t = start
+  inc t                                    # symdef
+  if t.kind != SymbolDef: return ""
+  skip t                                   # past symdef
+  if t.kind == ParRi: return ""
+  skip t                                   # past export marker
+  if t.kind == ParRi: return ""
+  skip t                                   # past pragmas
+  if t.kind == Symbol:
+    result = demangle(pool.syms[t.symId])
+
+proc scanVarType(buf: var TokenBuf; name: string): string =
+  ## Find any var/let/const declaration named `name` and return its type name.
+  result = ""
+  var n = beginRead(buf)
+  var depth = 0
+  while true:
+    case n.kind
+    of ParLe:
+      if pool.tags[n.tagId] in VarTags:
+        var t = n
+        inc t
+        if t.kind == SymbolDef and demangle(pool.syms[t.symId]) == name:
+          let tn = typeSlotName(n)
+          if tn.len > 0: return tn
+      inc depth; inc n
+    of ParRi:
+      dec depth; inc n
+      if depth <= 0: break
+    of EofToken: break
+    else: inc n
+
+proc collectTypeFields(buf: var TokenBuf; typeName: string): seq[DocumentSymbol] =
+  ## Fields (`fld`/`efld`) of the `type` declaration named `typeName`.
   result = @[]
+  var n = beginRead(buf)
+  var depth = 0
+  while true:
+    case n.kind
+    of ParLe:
+      if pool.tags[n.tagId] == "type":
+        var t = n
+        inc t
+        if t.kind == SymbolDef and demangle(pool.syms[t.symId]) == typeName:
+          return collectFields(n)
+      inc depth; inc n
+    of ParRi:
+      dec depth; inc n
+      if depth <= 0: break
+    of EofToken: break
+    else: inc n
+
+proc firstParamType(procCursor: Cursor): string =
+  ## Type name of a routine's first parameter (UFCS receiver), or "".
+  result = ""
+  var c = procCursor
+  var depth = 0
+  while true:
+    case c.kind
+    of ParLe:
+      if pool.tags[c.tagId] == "param":
+        return typeSlotName(c)
+      inc depth; inc c
+    of ParRi:
+      dec depth; inc c
+      if depth <= 0: break
+    of EofToken: break
+    else: inc c
+
+proc collectUfcsMethods(buf: var TokenBuf; typeName: string): seq[CompletionItem] =
+  ## Top-level routines whose FIRST parameter type is `typeName` (UFCS methods).
+  result = @[]
+  var n = beginRead(buf)
+  var depth = 0
+  while true:
+    case n.kind
+    of ParLe:
+      if pool.tags[n.tagId] in RoutineTags:
+        var t = n
+        inc t
+        if t.kind == SymbolDef:
+          let pname = demangle(pool.syms[t.symId])
+          if pname.len > 0 and firstParamType(n) == typeName:
+            result.add CompletionItem(label: pname, kind: cikMethod)
+      inc depth; inc n
+    of ParRi:
+      dec depth; inc n
+      if depth <= 0: break
+    of EofToken: break
+    else: inc n
+
+proc dotMemberCompletions(cfg: Config; file: string; pos: Position;
+                          bufText: string): Option[seq[CompletionItem]] =
+  ## If `pos` is in `<ident>.` member-access context AND we can resolve the
+  ## base identifier's object type, return its fields + UFCS methods. Otherwise
+  ## `none`, so the caller falls back to the full completion list.
+  ##
+  ## `bufText` is the live (possibly unsaved) editor buffer; when non-empty it
+  ## is used instead of the on-disk file so member completion works while typing.
+  var raw = bufText
+  if raw.len == 0:
+    try: raw = readFile(file)
+    except CatchableError: return none(seq[CompletionItem])
+  let lines = raw.splitLines
+  if pos.line < 0 or pos.line >= lines.len: return none(seq[CompletionItem])
+  let line = lines[pos.line]
+  let ci = pos.character
+  if ci <= 0 or ci > line.len: return none(seq[CompletionItem])
+  if line[ci - 1] != '.': return none(seq[CompletionItem])
+  # Base identifier immediately before the dot.
+  var b = ci - 1
+  while b > 0 and line[b - 1] in IdChars: dec b
+  let base = line[b ..< ci - 1]
+  if base.len == 0: return none(seq[CompletionItem])
+  # Repair the in-progress line (drop the trailing `.<partial>`) so the buffer
+  # parses, then compile that temp file to resolve the base's type.
+  var repaired = lines
+  repaired[pos.line] = line[0 ..< ci - 1]
+  let dir = if file.isAbsolute: parentDir(file) else: getCurrentDir()
+  let tmp = dir / ("nimlsp_dot_" & $getCurrentProcessId() & ".nim")
+  # Snapshot nimcache so we can delete exactly the artifacts this temp compile
+  # produces — otherwise every dot-completion permanently grows nimcache and
+  # pollutes workspace-symbol results.
+  let ncdir = nimcacheDir(cfg)
+  var ncBefore = initHashSet[string]()
+  if dirExists(ncdir):
+    for f in walkFiles(ncdir / "*"): ncBefore.incl f
+  var nifPath = ""
+  try:
+    writeFile(tmp, repaired.join("\n"))
+    nifPath = ensureArtifact(cfg, tmp)
+  except CatchableError:
+    discard
+  proc cleanup() =
+    try: removeFile(tmp) except CatchableError: discard
+    if dirExists(ncdir):
+      for f in walkFiles(ncdir / "*"):
+        if f notin ncBefore:
+          try: removeFile(f) except CatchableError: discard
+  if nifPath.len == 0 or not fileExists(nifPath):
+    cleanup()
+    return none(seq[CompletionItem])
+  var items: seq[CompletionItem] = @[]
+  var seen = initHashSet[string]()
+  try:
+    var s = nifstreams.open(nifPath)
+    var buf: TokenBuf
+    try:
+      discard processDirectives(s.r)
+      buf = fromStream(s)
+    finally:
+      nifstreams.close s
+    let typeName = scanVarType(buf, base)
+    if typeName.len > 0:
+      for ds in collectTypeFields(buf, typeName):
+        if ds.name.len > 0 and ds.name notin seen:
+          seen.incl ds.name
+          items.add CompletionItem(label: ds.name,
+                                   kind: toCompletionKind(ds.kind))
+      for it in collectUfcsMethods(buf, typeName):
+        if it.label.len > 0 and it.label notin seen:
+          seen.incl it.label
+          items.add it
+  except CatchableError:
+    discard
+  cleanup()
+  if items.len == 0: return none(seq[CompletionItem])
+  return some(items)
+
+proc completions*(cfg: Config; file: string; pos: Position;
+                  bufText: string = ""): seq[CompletionItem] =
+  result = @[]
+  # Dot-context member completion (best-effort; falls back on failure).
+  try:
+    let mem = dotMemberCompletions(cfg, file, pos, bufText)
+    if mem.isSome and mem.get.len > 0:
+      return mem.get
+  except CatchableError:
+    discard
   var seen = initHashSet[string]()
   try:
     let nifPath = ensureArtifact(cfg, file)

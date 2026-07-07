@@ -58,13 +58,21 @@ binary through an LSP client harness and verified against `nimony` 0.4.0.
 | Diagnostics (errors / warnings, with related info) | `nimony check` stdout parsing | ✅ |
 | Go to definition | `nimony check --def` (idetools) | ✅ |
 | Find references | `nimony check --usages` (idetools), deduplicated | ✅ |
-| Hover | in-process NIF declaration rendering | ✅ |
+| Hover | in-process NIF resolution → multi-line signature + doc comment | ✅ |
 | Document symbols | in-process `.s.nif` top-level walk (types carry field children) | ✅ |
-| Completion | current module + imported modules' `.s.idx.nif` exports | ✅ |
+| Completion | module + imported `.s.idx.nif` exports; **dot-context member completion** (fields + UFCS methods) on the live buffer | ✅ |
+| Signature help | enclosing-call parse → idetools → parameter list + active parameter | ✅ |
+| Document highlight | idetools occurrences in the file, read/write classified | ✅ |
+| Rename (+ prepareRename) | idetools references → cross-file `WorkspaceEdit` | ✅ |
+| Workspace symbol | name search across every `.s.nif` in `nimcache` | ✅ |
+| Semantic tokens (full) | NIF walk → typed token legend, delta-encoded | ✅ |
+| Inlay hints | inferred-type hints for un-annotated `let`/`var`/`const` | ✅ |
 | Syntax highlighting | TextMate grammar (`source.nimony`) | ✅ |
 
-Text document sync is full-document (`textDocumentSync: 1`); trigger characters
-for completion are `.` and `(`.
+Text document sync is full-document (`textDocumentSync: 1`); completion triggers
+on `.` and `(`, signature help on `(` and `,`. A **generation-based cache**
+coalesces the many `nimony check` invocations a single editor request would
+otherwise trigger into one, invalidated on any document change.
 
 ## Layout
 
@@ -83,10 +91,16 @@ nimony-lsp/
 │       │   ├── state.nim       Config + ServerState (open docs, roots)
 │       │   └── documents.nim   Document: text, versions, UTF-16 ↔ offset mapping
 │       └── driver/
-│           ├── nimonycli.nim   run `nimony check [--def/--usages]`, capture output
+│           ├── nimonycli.nim   run `nimony check [--def/--usages]` + generation cache
 │           ├── diagnostics.nim parse `path(line,col) Kind: msg` → Diagnostic[]
 │           ├── idetools.nim    parse def/use tab records → Location[]
-│           └── nifindex.nim    in-process .s.nif/.s.idx.nif → symbols / hover / completion
+│           ├── nifindex.nim    in-process .s.nif/.s.idx.nif → symbols / hover / completion
+│           ├── signature.nim   signatureHelp: enclosing-call parse + idetools
+│           ├── highlight.nim   documentHighlight: in-file occurrences, read/write
+│           ├── rename.nim      prepareRename + rename → WorkspaceEdit
+│           ├── workspacesym.nim workspace/symbol: name search over nimcache
+│           ├── semtokens.nim   semanticTokens/full: NIF walk → token legend
+│           └── inlay.nim       inlayHint: inferred-type hints
 ├── client/                     VSCode extension (TypeScript, vscode-languageclient)
 │   ├── package.json
 │   ├── src/extension.ts        spawns the server over stdio; status bar; restart command
@@ -228,13 +242,18 @@ only apply the 0/1-based line/col shift.
 Current, honest edges — none block day-to-day use:
 
 - Text sync is full-document rather than incremental.
-- Diagnostics and document symbols run `nimony check` per request; there is no
-  persistent nimcache index yet, so large modules re-check on change.
-- Hover shows the definition's signature line; some type-usage references are
-  missed because `idetools` type-use resolution is still young upstream — the
-  server deduplicates what it returns but cannot recover uses the backend does not
-  emit.
-- Symbol `range` equals `selectionRange` (the declaration name span).
+- Diagnostics run on open/save (not per keystroke): `nimony` has no dirty-buffer
+  mechanism and `check` is whole-project, so live-as-you-type checking would need
+  an async worker. Navigation, hover, symbols, and semantic tokens read the
+  **saved** file; the one exception is **member completion**, which resolves the
+  live buffer via a throwaway temp compile.
+- The generation cache coalesces redundant checks within a request but is not yet
+  a persistent index, so large modules still re-check after an edit.
+- Some type-usage references are missed because `idetools` type-use resolution is
+  young upstream — the server deduplicates what it returns but cannot recover uses
+  the backend never emits (this also bounds rename/highlight completeness).
+- Semantic-token modifiers are always `0` (types only); symbol `range` equals
+  `selectionRange` (the declaration name span).
 
 ## Requirements
 

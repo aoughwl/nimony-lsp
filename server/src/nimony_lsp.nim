@@ -12,7 +12,7 @@ import driver/[diagnostics, idetools, nifindex, nimonycli,
 
 const
   ServerName = "nimony-lsp"
-  ServerVersion = "0.1.0"
+  ServerVersion = "0.2.0"
 
 var gState = newServerState()
 var gOut = stdout
@@ -108,7 +108,7 @@ proc handleCompletion(params: JsonNode): JsonNode =
   let uri = textDocumentUri(params)
   let doc = gState.getDoc(uri)
   if doc == nil: return newJArray()
-  let items = nifindex.completions(gState.config, filePath(uri), positionParam(params))
+  let items = nifindex.completions(gState.config, filePath(uri), positionParam(params), doc.text)
   toJsonArray(items)
 
 proc handleSignatureHelp(params: JsonNode): JsonNode =
