@@ -8,7 +8,8 @@ import std/[json, options, os, tables]
 import lsp/[jsonrpc, protocol, uris]
 import server/[state, documents]
 import driver/[diagnostics, idetools, nifindex, nimonycli,
-               signature, highlight, rename, workspacesym, semtokens, inlay]
+               signature, highlight, rename, workspacesym, semtokens, inlay,
+               folding, selection, callhierarchy, extranav]
 
 const
   ServerName = "nimony-lsp"
@@ -69,6 +70,11 @@ proc handleInitialize(params: JsonNode): JsonNode =
       "renameProvider": {"prepareProvider": true},
       "workspaceSymbolProvider": true,
       "inlayHintProvider": true,
+      "foldingRangeProvider": true,
+      "selectionRangeProvider": true,
+      "callHierarchyProvider": true,
+      "typeDefinitionProvider": true,
+      "implementationProvider": true,
       "semanticTokensProvider": {
         "legend": {"tokenTypes": tokenTypes, "tokenModifiers": tokenMods},
         "full": true
@@ -147,6 +153,40 @@ proc handleSemanticTokensFull(params: JsonNode): JsonNode =
   if doc == nil: return %*{"data": newJArray()}
   %semtokens.semanticTokensFull(gState.config, doc)
 
+proc handleFoldingRange(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  toJsonArray(folding.foldingRanges(gState.config, doc))
+
+proc handleSelectionRange(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  toJsonArray(selection.selectionRanges(gState.config, doc, selectionPositions(params)))
+
+proc handlePrepareCallHierarchy(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJNull()
+  let items = callhierarchy.prepareCallHierarchy(gState.config, doc, positionParam(params))
+  if items.len == 0: newJNull() else: toJsonArray(items)
+
+proc handleIncomingCalls(params: JsonNode): JsonNode =
+  toJsonArray(callhierarchy.incomingCalls(gState.config, callHierarchyItemParam(params)))
+
+proc handleOutgoingCalls(params: JsonNode): JsonNode =
+  toJsonArray(callhierarchy.outgoingCalls(gState.config, callHierarchyItemParam(params)))
+
+proc handleTypeDefinition(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJNull()
+  let locs = extranav.typeDefinition(gState.config, doc, positionParam(params))
+  if locs.len == 0: newJNull() else: toJsonArray(locs)
+
+proc handleImplementation(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJNull()
+  let locs = extranav.implementation(gState.config, doc, positionParam(params))
+  if locs.len == 0: newJNull() else: toJsonArray(locs)
+
 # --------------------------------------------------------------------------
 # notification handlers (document sync)
 # --------------------------------------------------------------------------
@@ -202,6 +242,13 @@ proc dispatchRequest(m: Message): JsonNode =
   of "textDocument/inlayHint": response(m.id, handleInlayHint(m.params))
   of "textDocument/semanticTokens/full": response(m.id, handleSemanticTokensFull(m.params))
   of "workspace/symbol": response(m.id, handleWorkspaceSymbol(m.params))
+  of "textDocument/foldingRange": response(m.id, handleFoldingRange(m.params))
+  of "textDocument/selectionRange": response(m.id, handleSelectionRange(m.params))
+  of "textDocument/prepareCallHierarchy": response(m.id, handlePrepareCallHierarchy(m.params))
+  of "callHierarchy/incomingCalls": response(m.id, handleIncomingCalls(m.params))
+  of "callHierarchy/outgoingCalls": response(m.id, handleOutgoingCalls(m.params))
+  of "textDocument/typeDefinition": response(m.id, handleTypeDefinition(m.params))
+  of "textDocument/implementation": response(m.id, handleImplementation(m.params))
   else: errorResponse(m.id, MethodNotFound, "unhandled method: " & m.meth)
 
 proc dispatchNotification(m: Message) =
