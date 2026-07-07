@@ -1,0 +1,103 @@
+{
+  "name": "nimony",
+  "displayName": "Nimony",
+  "description": "Language support for Nimony (the NIF-based Nim successor), powered by the nimony-lsp language server.",
+  "version": "0.1.0",
+  "publisher": "nimony",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "nim",
+    "nimony",
+    "nif",
+    "lsp",
+    "language-server"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:nimony",
+    "onLanguage:nim"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "nimony",
+        "aliases": [
+          "Nimony",
+          "nimony"
+        ],
+        "extensions": [
+          ".nim",
+          ".nims",
+          ".nimony"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nimony",
+        "scopeName": "source.nimony",
+        "path": "./syntaxes/nimony.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "nimony.restartServer",
+        "title": "Nimony: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Nimony",
+      "properties": {
+        "nimony.serverPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the `nimony-lsp` server binary. When empty, the extension auto-resolves the binary bundled alongside the extension, then falls back to `/home/savant/nimony-lsp/server/bin/nimony-lsp`."
+        },
+        "nimony.nimonyPath": {
+          "type": "string",
+          "default": "/home/savant/nimony/bin/nimony",
+          "description": "Path to the Nimony compiler binary. Passed to the language server via initializationOptions."
+        },
+        "nimony.extraPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional module search paths passed to the Nimony compiler via the language server."
+        },
+        "nimony.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VSCode and the Nimony language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}

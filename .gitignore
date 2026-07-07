@@ -1,0 +1,17 @@
+# Nim server build artifacts
+server/bin/
+server/nimcache/
+nimcache/
+*.exe
+
+# VSCode extension build artifacts
+client/out/
+client/node_modules/
+client/*.vsix
+client/.vscode-test/
+
+# Nimony scratch
+_lsptmp/
+
+# OS
+.DS_Store

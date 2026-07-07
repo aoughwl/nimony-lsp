@@ -1,0 +1,269 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Nimony",
+  "scopeName": "source.nimony",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#pragmas" },
+    { "include": "#strings" },
+    { "include": "#characters" },
+    { "include": "#numbers" },
+    { "include": "#definitions" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#types" },
+    { "include": "#function-calls" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.nimony",
+          "begin": "##\\[",
+          "end": "\\]##",
+          "patterns": [ { "include": "#comment-block-inner" } ]
+        },
+        {
+          "name": "comment.block.nimony",
+          "begin": "#\\[",
+          "end": "\\]#",
+          "patterns": [ { "include": "#comment-block-inner" } ]
+        },
+        {
+          "name": "comment.line.number-sign.documentation.nimony",
+          "begin": "##",
+          "end": "$"
+        },
+        {
+          "name": "comment.line.number-sign.nimony",
+          "begin": "#",
+          "end": "$"
+        }
+      ]
+    },
+    "comment-block-inner": {
+      "patterns": [
+        {
+          "name": "comment.block.nimony",
+          "begin": "#\\[",
+          "end": "\\]#",
+          "patterns": [ { "include": "#comment-block-inner" } ]
+        }
+      ]
+    },
+    "pragmas": {
+      "name": "meta.pragma.nimony",
+      "begin": "\\{\\.",
+      "end": "\\.?\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.pragma.begin.nimony" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.pragma.end.nimony" }
+      },
+      "patterns": [
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        {
+          "match": "\\b([a-zA-Z][a-zA-Z0-9_]*)\\b",
+          "name": "storage.modifier.pragma.nimony"
+        },
+        { "include": "#operators" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.triple.nimony",
+          "begin": "\"\"\"",
+          "end": "\"\"\"(?!\")",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.nimony" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.nimony" }
+          }
+        },
+        {
+          "name": "string.quoted.double.raw.nimony",
+          "begin": "\\b([a-zA-Z][a-zA-Z0-9_]*)?r\"",
+          "end": "\"(?!\")",
+          "beginCaptures": {
+            "1": { "name": "entity.name.function.raw-string-prefix.nimony" },
+            "0": { "name": "punctuation.definition.string.begin.nimony" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.nimony" }
+          },
+          "patterns": [
+            { "match": "\"\"", "name": "constant.character.escape.nimony" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.interpolated.nimony",
+          "begin": "\\b([a-zA-Z][a-zA-Z0-9_]*)\"",
+          "end": "\"",
+          "beginCaptures": {
+            "1": { "name": "entity.name.function.string-prefix.nimony" },
+            "0": { "name": "punctuation.definition.string.begin.nimony" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.nimony" }
+          },
+          "patterns": [
+            { "include": "#string-escapes" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.nimony",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.nimony" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.nimony" }
+          },
+          "patterns": [
+            { "include": "#string-escapes" }
+          ]
+        }
+      ]
+    },
+    "string-escapes": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.nimony",
+          "match": "\\\\(?:[abcefnrtvl\\\\\"'\\s]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|u\\{[0-9A-Fa-f]+\\}|[0-9]+)"
+        }
+      ]
+    },
+    "characters": {
+      "name": "string.quoted.single.nimony",
+      "match": "'(?:\\\\(?:[abcefnrtvl\\\\\"'0]|x[0-9A-Fa-f]{2}|[0-9]+)|[^'\\\\])'",
+      "captures": {
+        "0": { "name": "constant.character.nimony" }
+      }
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.nimony",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?(?:'?[fF](?:32|64|128)?)\\b"
+        },
+        {
+          "name": "constant.numeric.float.nimony",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*(?:[eE][+-]?[0-9][0-9_]*)?\\b"
+        },
+        {
+          "name": "constant.numeric.hex.nimony",
+          "match": "\\b0[xX][0-9A-Fa-f][0-9A-Fa-f_]*(?:'?[iIuU](?:8|16|32|64)?)?\\b"
+        },
+        {
+          "name": "constant.numeric.octal.nimony",
+          "match": "\\b0[oO][0-7][0-7_]*(?:'?[iIuU](?:8|16|32|64)?)?\\b"
+        },
+        {
+          "name": "constant.numeric.binary.nimony",
+          "match": "\\b0[bB][01][01_]*(?:'?[iIuU](?:8|16|32|64)?)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.nimony",
+          "match": "\\b[0-9][0-9_]*(?:'?[iIuUfF](?:8|16|32|64|128)?)?\\b"
+        }
+      ]
+    },
+    "definitions": {
+      "patterns": [
+        {
+          "match": "\\b(proc|func|method|iterator|converter|macro|template)\\s+(`[^`]+`|[a-zA-Z\\x{80}-\\x{FFFF}][a-zA-Z0-9_\\x{80}-\\x{FFFF}]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.nimony" },
+            "2": { "name": "entity.name.function.nimony" }
+          }
+        },
+        {
+          "match": "\\b(type)\\s+(`[^`]+`|[a-zA-Z\\x{80}-\\x{FFFF}][a-zA-Z0-9_\\x{80}-\\x{FFFF}]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.nimony" },
+            "2": { "name": "entity.name.type.nimony" }
+          }
+        },
+        {
+          "match": "^\\s*(`[^`]+`|[A-Z][a-zA-Z0-9_]*)\\s*(\\*)?\\s*(?:\\[[^\\]]*\\])?\\s*(=)\\s*(?=object|enum|tuple|ref\\b|ptr\\b|distinct\\b|concept\\b)",
+          "captures": {
+            "1": { "name": "entity.name.type.nimony" },
+            "2": { "name": "keyword.operator.export.nimony" },
+            "3": { "name": "keyword.operator.assignment.nimony" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.nimony",
+          "match": "\\b(if|elif|else|case|of|while|for|in|notin|return|yield|break|continue|discard|raise|try|except|finally|defer|block|when)\\b"
+        },
+        {
+          "name": "keyword.declaration.nimony",
+          "match": "\\b(proc|func|method|iterator|converter|macro|template|type|const|let|var|using|object|tuple|enum|ptr|ref|distinct|concept|import|export|include|from|as|mixin|bind|static|out|asm|cast|do|end|passive)\\b"
+        },
+        {
+          "name": "keyword.operator.word.nimony",
+          "match": "\\b(and|or|not|xor|shl|shr|div|mod|is|isnot|of|addr)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.nimony",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.nil.nimony",
+          "match": "\\bnil\\b"
+        }
+      ]
+    },
+    "types": {
+      "name": "storage.type.nimony",
+      "match": "\\b(int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|float|float32|float64|bool|char|string|cstring|pointer|seq|array|set|openArray|void|auto|untyped|typed)\\b"
+    },
+    "function-calls": {
+      "match": "\\b([a-zA-Z\\x{80}-\\x{FFFF}][a-zA-Z0-9_\\x{80}-\\x{FFFF}]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.nimony" }
+      }
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.nimony",
+          "match": "(?<![=<>!+\\-*/@$~&%|^.:?])=(?![=<>!+\\-*/@$~&%|^.:?])"
+        },
+        {
+          "name": "keyword.operator.export.nimony",
+          "match": "(?<=[a-zA-Z0-9_])\\*(?=\\s*[):=,\\]}]|\\s*$)"
+        },
+        {
+          "name": "keyword.operator.nimony",
+          "match": "[=+\\-*/<>@$~&%|!?^.:]+|\\\\"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.comma.nimony", "match": "," },
+        { "name": "punctuation.separator.colon.nimony", "match": ";" },
+        { "name": "meta.brace.round.nimony", "match": "[()]" },
+        { "name": "meta.brace.square.nimony", "match": "[\\[\\]]" },
+        { "name": "meta.brace.curly.nimony", "match": "[{}]" }
+      ]
+    }
+  }
+}
