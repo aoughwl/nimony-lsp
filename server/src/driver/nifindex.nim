@@ -31,7 +31,7 @@ from nifreader import processDirectives
 # Small helpers
 # --------------------------------------------------------------------------
 
-proc relFileFor(cfg: Config; file: string): string =
+proc relFileFor*(cfg: Config; file: string): string =
   ## Path as nimony sees it: relative to the project root, using '/'.
   if cfg.projectRoot.len > 0 and file.isAbsolute:
     result = relativePath(file, cfg.projectRoot, '/')
@@ -39,12 +39,12 @@ proc relFileFor(cfg: Config; file: string): string =
     result = file
   result = result.replace('\\', '/')
 
-proc nimcacheDir(cfg: Config): string =
+proc nimcacheDir*(cfg: Config): string =
   let root = if cfg.projectRoot.len > 0 and dirExists(cfg.projectRoot): cfg.projectRoot
              else: getCurrentDir()
   result = root / "nimcache"
 
-proc demangle(sym: string): string =
+proc demangle*(sym: string): string =
   ## `add.0.` / `add.0.Mod9` / `x.0.` -> `add` / `x`.
   var isGlobal = false
   result = extractBasename(sym, isGlobal)
@@ -52,7 +52,7 @@ proc demangle(sym: string): string =
     let sn = splitSymName(sym)
     result = if sn.name.len > 0: sn.name else: sym
 
-proc classifyKind(tagName: string): Option[SymbolKind] =
+proc classifyKind*(tagName: string): Option[SymbolKind] =
   case tagName
   of "proc", "func", "converter", "iterator", "macro", "template":
     some(skFunction)
@@ -81,13 +81,13 @@ proc toCompletionKind(sk: SymbolKind): CompletionItemKind =
 # Locating the .s.nif artifact for a source file
 # --------------------------------------------------------------------------
 
-proc pathsMatch(stored, rel: string): bool =
+proc pathsMatch*(stored, rel: string): bool =
   let a = stored.replace('\\', '/')
   let b = rel.replace('\\', '/')
   result = a == b or a.endsWith("/" & b) or b.endsWith("/" & a) or
            extractFilename(a) == extractFilename(b) and (a.endsWith(b) or b.endsWith(a))
 
-proc firstStmtsFile(nifPath: string): string =
+proc firstStmtsFile*(nifPath: string): string =
   ## Open a .s.nif, skip directives, read the first token (the module `stmts`)
   ## and return the source file recorded in its line info (as nimony stored it).
   result = ""
@@ -102,7 +102,7 @@ proc firstStmtsFile(nifPath: string): string =
   finally:
     nifstreams.close s
 
-proc findSNif(cfg: Config; file: string): string =
+proc findSNif*(cfg: Config; file: string): string =
   ## Return the absolute path to the `.s.nif` whose module body is `file`,
   ## or "" if none can be found.
   result = ""
@@ -119,7 +119,7 @@ proc findSNif(cfg: Config; file: string): string =
       return f
   return ""
 
-proc ensureArtifact(cfg: Config; file: string): string =
+proc ensureArtifact*(cfg: Config; file: string): string =
   ## (Re)generate the nimcache artifacts for `file` and return its `.s.nif`.
   let rel = relFileFor(cfg, file)
   discard nimonycli.run(cfg, "check", rel)
@@ -129,7 +129,7 @@ proc ensureArtifact(cfg: Config; file: string): string =
 # documentSymbols
 # --------------------------------------------------------------------------
 
-proc mkSymRange(info: PackedLineInfo; nameLen: int): (Range, bool) =
+proc mkSymRange*(info: PackedLineInfo; nameLen: int): (Range, bool) =
   let up = unpack(pool.man, info)
   if not up.file.isValid or up.line <= 0:
     return (mkRange(0, 0, 0, 0), false)
