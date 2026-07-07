@@ -3,16 +3,20 @@
 The VSCode client for [`nimony-lsp`](../ARCHITECTURE.md), a Language Server
 Protocol implementation for **Nimony** (the NIF-based Nim successor).
 
-It provides diagnostics, go-to-definition, find-references, hover, document
-symbols, and completion by driving the `nimony-lsp` server over stdio.
+It drives the `nimony-lsp` server over stdio to provide navigation, diagnostics,
+and NIF-backed intelligence for Nimony code.
 
 ## Features
 
-- Live diagnostics (errors / warnings / traces) as you type
+- Diagnostics (errors / warnings / traces) on open and save
 - Go to Definition and Find All References
-- Hover information
-- Document symbols (outline / breadcrumbs)
-- Completion (triggered on `.` and `(`)
+- Hover — signature + doc comment
+- Signature help (parameter hints while calling)
+- Document highlight (occurrences of the symbol under the cursor)
+- Rename (project-wide, with prepare-rename validation)
+- Document symbols (outline / breadcrumbs) and Workspace symbol search
+- Completion, including `.`-triggered member completion (fields + UFCS methods)
+- Semantic tokens (type-aware highlighting) and inlay type hints
 - Syntax highlighting for `.nim`, `.nims`, and `.nimony` files
 - Status bar item showing the server state (starting / running / stopped)
 - `Nimony: Restart Language Server` command

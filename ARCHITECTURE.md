@@ -119,8 +119,34 @@ alignment (codepoint==UTF-16) and centralize the conversion so we can harden lat
 - `driver/nifindex.nim` (reuses /home/savant/nimony/src/lib)
   - `proc documentSymbols(cfg: Config; file: string): seq[DocumentSymbol]`
   - `proc hoverAt(cfg: Config; file: string; pos: Position): Option[Hover]`
-  - `proc completions(cfg: Config; file: string; pos: Position): seq[CompletionItem]`
-  - Backed by reading `nimcache/*.idx.nif` + `.s.nif` for the module.
+    — multi-line signature (procs/types) + attached `##` doc comment.
+  - `proc completions(cfg: Config; file: string; pos: Position; bufText = ""): seq[CompletionItem]`
+    — module + imported exports, plus dot-context member completion (fields +
+    UFCS methods). `bufText` is the live buffer; member resolution compiles a
+    repaired throwaway temp and cleans up its nimcache artifacts.
+  - Exposes the NIF-walking helpers (`ensureArtifact`, `findSNif`, `demangle`,
+    `classifyKind`, `mkSymRange`, `nimcacheDir`, …) reused by the drivers below.
+
+## v0.2 feature drivers & cache
+
+- `driver/nimonycli.nim` — `bumpCheckGeneration()` clears a `(sub, file, track)`
+  → `CheckResult` cache keyed by a generation counter; the dispatch bumps it on
+  every document lifecycle event, so redundant whole-project checks within one
+  request collapse to a single compiler run.
+- `driver/signature.nim` — `signatureHelp(cfg, doc, pos)`: literal/comment-aware
+  backward scan for the enclosing `(`, top-level comma count → active parameter,
+  callee resolved via idetools, declaration line parsed into parameters.
+- `driver/highlight.nim` — `documentHighlights(cfg, doc, pos)`: idetools
+  occurrences filtered to the current file, definition = Write, uses = Read.
+- `driver/rename.nim` — `prepareRename` / `rename(cfg, doc, pos, newName)`:
+  idetools references ∪ definition → per-file `TextEdit`s in a `WorkspaceEdit`.
+- `driver/workspacesym.nim` — `workspaceSymbols(cfg, query)`: walks every
+  `nimcache/*.s.nif`, top-level decls whose name matches, bounded at 500.
+- `driver/semtokens.nim` — `semanticTokensFull(cfg, doc)`: two-pass NIF walk
+  (declared-symbol → token type, then every occurrence), delta-encoded into the
+  shared legend in `protocol.nim`.
+- `driver/inlay.nim` — `inlayHints(cfg, doc, range)`: `let`/`var`/`const` with no
+  source `:` annotation → `: <inferred type>` from the NIF type slot.
 
 ## Build
 
