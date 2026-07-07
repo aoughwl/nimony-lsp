@@ -7,7 +7,8 @@
 import std/[json, options, os, tables]
 import lsp/[jsonrpc, protocol, uris]
 import server/[state, documents]
-import driver/[diagnostics, idetools, nifindex]
+import driver/[diagnostics, idetools, nifindex, nimonycli,
+               signature, highlight, rename, workspacesym, semtokens, inlay]
 
 const
   ServerName = "nimony-lsp"
@@ -51,6 +52,10 @@ proc handleInitialize(params: JsonNode): JsonNode =
     if ep != nil and ep.kind == JArray:
       for x in ep: gState.config.extraPaths.add(x.getStr)
   gState.initialized = true
+  var tokenTypes = newJArray()
+  for t in SemanticTokenTypes: tokenTypes.add(%t)
+  var tokenMods = newJArray()
+  for m in SemanticTokenModifiers: tokenMods.add(%m)
   result = %*{
     "capabilities": {
       "textDocumentSync": {"openClose": true, "change": 1, "save": {"includeText": false}},
@@ -58,8 +63,16 @@ proc handleInitialize(params: JsonNode): JsonNode =
       "referencesProvider": true,
       "hoverProvider": true,
       "documentSymbolProvider": true,
+      "documentHighlightProvider": true,
       "completionProvider": {"triggerCharacters": [".", "("]},
-      "workspaceSymbolProvider": false
+      "signatureHelpProvider": {"triggerCharacters": ["(", ","], "retriggerCharacters": [","]},
+      "renameProvider": {"prepareProvider": true},
+      "workspaceSymbolProvider": true,
+      "inlayHintProvider": true,
+      "semanticTokensProvider": {
+        "legend": {"tokenTypes": tokenTypes, "tokenModifiers": tokenMods},
+        "full": true
+      }
     },
     "serverInfo": {"name": ServerName, "version": ServerVersion}
   }
@@ -98,11 +111,48 @@ proc handleCompletion(params: JsonNode): JsonNode =
   let items = nifindex.completions(gState.config, filePath(uri), positionParam(params))
   toJsonArray(items)
 
+proc handleSignatureHelp(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJNull()
+  let sh = signature.signatureHelp(gState.config, doc, positionParam(params))
+  if sh.isSome: %sh.get else: newJNull()
+
+proc handleDocumentHighlight(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  toJsonArray(highlight.documentHighlights(gState.config, doc, positionParam(params)))
+
+proc handlePrepareRename(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJNull()
+  let r = rename.prepareRename(gState.config, doc, positionParam(params))
+  if r.isSome: %r.get else: newJNull()
+
+proc handleRename(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJNull()
+  let we = rename.rename(gState.config, doc, positionParam(params), renameNewName(params))
+  if we.isSome: %we.get else: newJNull()
+
+proc handleWorkspaceSymbol(params: JsonNode): JsonNode =
+  toJsonArray(workspacesym.workspaceSymbols(gState.config, queryParam(params)))
+
+proc handleInlayHint(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  toJsonArray(inlay.inlayHints(gState.config, doc, rangeParam(params)))
+
+proc handleSemanticTokensFull(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return %*{"data": newJArray()}
+  %semtokens.semanticTokensFull(gState.config, doc)
+
 # --------------------------------------------------------------------------
 # notification handlers (document sync)
 # --------------------------------------------------------------------------
 
 proc handleDidOpen(params: JsonNode) =
+  bumpCheckGeneration()
   let td = params{"textDocument"}
   if td == nil: return
   let uri = td{"uri"}.getStr
@@ -111,6 +161,7 @@ proc handleDidOpen(params: JsonNode) =
   refreshDiagnostics(uri)
 
 proc handleDidChange(params: JsonNode) =
+  bumpCheckGeneration()
   let uri = textDocumentUri(params)
   let doc = gState.getDoc(uri)
   if doc == nil: return
@@ -122,9 +173,11 @@ proc handleDidChange(params: JsonNode) =
                last{"text"}.getStr(""))
 
 proc handleDidSave(params: JsonNode) =
+  bumpCheckGeneration()
   refreshDiagnostics(textDocumentUri(params))
 
 proc handleDidClose(params: JsonNode) =
+  bumpCheckGeneration()
   gState.closeDoc(textDocumentUri(params))
 
 # --------------------------------------------------------------------------
@@ -142,6 +195,13 @@ proc dispatchRequest(m: Message): JsonNode =
   of "textDocument/hover": response(m.id, handleHover(m.params))
   of "textDocument/documentSymbol": response(m.id, handleDocumentSymbol(m.params))
   of "textDocument/completion": response(m.id, handleCompletion(m.params))
+  of "textDocument/signatureHelp": response(m.id, handleSignatureHelp(m.params))
+  of "textDocument/documentHighlight": response(m.id, handleDocumentHighlight(m.params))
+  of "textDocument/prepareRename": response(m.id, handlePrepareRename(m.params))
+  of "textDocument/rename": response(m.id, handleRename(m.params))
+  of "textDocument/inlayHint": response(m.id, handleInlayHint(m.params))
+  of "textDocument/semanticTokens/full": response(m.id, handleSemanticTokensFull(m.params))
+  of "workspace/symbol": response(m.id, handleWorkspaceSymbol(m.params))
   else: errorResponse(m.id, MethodNotFound, "unhandled method: " & m.meth)
 
 proc dispatchNotification(m: Message) =

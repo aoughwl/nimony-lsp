@@ -72,6 +72,74 @@ type
     documentation*: string
     insertText*: string
 
+  # ---- signatureHelp ----
+  ParameterInformation* = object
+    label*: string              ## substring of the signature label
+
+  SignatureInformation* = object
+    label*: string
+    documentation*: string      ## markdown; omitted when empty
+    parameters*: seq[ParameterInformation]
+
+  SignatureHelp* = object
+    signatures*: seq[SignatureInformation]
+    activeSignature*: int
+    activeParameter*: int
+
+  # ---- documentHighlight ----
+  DocumentHighlightKind* = enum
+    dhkText = 1, dhkRead = 2, dhkWrite = 3
+
+  DocumentHighlight* = object
+    `range`*: Range
+    kind*: DocumentHighlightKind
+
+  # ---- rename / workspace edits ----
+  TextEdit* = object
+    `range`*: Range
+    newText*: string
+
+  WorkspaceEdit* = object
+    changes*: seq[(string, seq[TextEdit])]   ## (uri, edits) pairs
+
+  PrepareRenameResult* = object
+    `range`*: Range
+    placeholder*: string
+
+  # ---- workspace/symbol ----
+  SymbolInformation* = object
+    name*: string
+    kind*: SymbolKind
+    location*: Location
+    containerName*: string
+
+  # ---- semantic tokens ----
+  SemanticTokens* = object
+    data*: seq[int]             ## 5-int LSP delta encoding, flattened
+
+  # ---- inlay hints ----
+  InlayHintKind* = enum
+    ihkType = 1, ihkParameter = 2
+
+  InlayHint* = object
+    position*: Position
+    label*: string
+    kind*: InlayHintKind
+    paddingLeft*: bool
+    paddingRight*: bool
+
+const
+  ## Fixed legend shared by the semanticTokens capability and semtokens.nim.
+  ## Producers MUST emit indices into these two arrays.
+  SemanticTokenTypes* = [
+    "namespace", "type", "class", "enum", "interface", "struct",
+    "typeParameter", "parameter", "variable", "property", "enumMember",
+    "event", "function", "method", "macro", "keyword", "modifier",
+    "comment", "string", "number", "regexp", "operator", "decorator"]
+  SemanticTokenModifiers* = [
+    "declaration", "definition", "readonly", "static", "deprecated",
+    "abstract", "async", "modification", "documentation", "defaultLibrary"]
+
 # --------------------------------------------------------------------------
 # to-JSON
 # --------------------------------------------------------------------------
@@ -126,6 +194,57 @@ proc `%`*(c: CompletionItem): JsonNode =
   if c.documentation.len > 0: result["documentation"] = %c.documentation
   if c.insertText.len > 0: result["insertText"] = %c.insertText
 
+proc `%`*(p: ParameterInformation): JsonNode =
+  %*{"label": p.label}
+
+proc `%`*(s: SignatureInformation): JsonNode =
+  result = %*{"label": s.label}
+  if s.documentation.len > 0:
+    result["documentation"] = %*{"kind": "markdown", "value": s.documentation}
+  if s.parameters.len > 0:
+    var arr = newJArray()
+    for p in s.parameters: arr.add(%p)
+    result["parameters"] = arr
+
+proc `%`*(h: SignatureHelp): JsonNode =
+  result = newJObject()
+  var arr = newJArray()
+  for s in h.signatures: arr.add(%s)
+  result["signatures"] = arr
+  result["activeSignature"] = %h.activeSignature
+  result["activeParameter"] = %h.activeParameter
+
+proc `%`*(d: DocumentHighlight): JsonNode =
+  %*{"range": %d.`range`, "kind": ord(d.kind)}
+
+proc `%`*(e: TextEdit): JsonNode =
+  %*{"range": %e.`range`, "newText": e.newText}
+
+proc `%`*(w: WorkspaceEdit): JsonNode =
+  var changes = newJObject()
+  for (uri, edits) in w.changes:
+    var arr = newJArray()
+    for e in edits: arr.add(%e)
+    changes[uri] = arr
+  result = %*{"changes": changes}
+
+proc `%`*(r: PrepareRenameResult): JsonNode =
+  %*{"range": %r.`range`, "placeholder": r.placeholder}
+
+proc `%`*(s: SymbolInformation): JsonNode =
+  result = %*{"name": s.name, "kind": ord(s.kind), "location": %s.location}
+  if s.containerName.len > 0: result["containerName"] = %s.containerName
+
+proc `%`*(t: SemanticTokens): JsonNode =
+  var arr = newJArray()
+  for x in t.data: arr.add(%x)
+  %*{"data": arr}
+
+proc `%`*(h: InlayHint): JsonNode =
+  result = %*{"position": %h.position, "label": h.label, "kind": ord(h.kind)}
+  if h.paddingLeft: result["paddingLeft"] = %true
+  if h.paddingRight: result["paddingRight"] = %true
+
 proc toJsonArray*[T](xs: seq[T]): JsonNode =
   result = newJArray()
   for x in xs: result.add(%x)
@@ -155,3 +274,15 @@ proc positionParam*(params: JsonNode): Position =
 proc mkRange*(sl, sc, el, ec: int): Range =
   Range(start: Position(line: sl, character: sc),
         `end`: Position(line: el, character: ec))
+
+proc renameNewName*(params: JsonNode): string =
+  if params == nil: return ""
+  params{"newName"}.getStr("")
+
+proc queryParam*(params: JsonNode): string =
+  if params == nil: return ""
+  params{"query"}.getStr("")
+
+proc rangeParam*(params: JsonNode): Range =
+  ## params.range (for inlay hints / range requests)
+  getRange(params{"range"})
