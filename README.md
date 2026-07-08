@@ -55,7 +55,7 @@ binary through an LSP client harness and verified against `nimony` 0.4.0.
 
 | LSP capability | Backing mechanism | Status |
 |----------------|-------------------|--------|
-| Diagnostics (errors / warnings, with related info) | `nimony check` stdout parsing | ✅ |
+| Diagnostics — **live, as-you-type** (errors/warnings + related info) | isolated-cache incremental `nimony check` on the unsaved buffer (~25ms/edit) | ✅ |
 | Go to definition | `nimony check --def` (idetools) | ✅ |
 | Find references | `nimony check --usages` (idetools), deduplicated | ✅ |
 | Hover | in-process NIF resolution → multi-line signature + doc comment | ✅ |
@@ -280,15 +280,11 @@ only apply the 0/1-based line/col shift.
 
 Current, honest edges — none block day-to-day use:
 
-- Diagnostics run on open/save (not per keystroke). This is **not** a compiler
-  limitation: Nimony's `check` is incrementally fast (~20ms per edit), and live
-  diagnostics on the *unsaved* buffer is proven to work (materialize the buffer
-  to a temp file, check, remap). What remains is doing it **off the stdio loop**
-  — a background worker with coalescing — so a ~1s cold check never blocks
-  typing. A first threaded worker proved unstable at teardown, so it is deferred
-  pending careful async work; it is the clear next step, not a blocker.
-  Navigation/hover/symbols/tokens read the **saved** file; member completion and
-  the document buffer (incremental sync) use the live text.
+- **Live diagnostics** run on the unsaved buffer as you type: the buffer is
+  materialized to a stable sibling temp file and checked into an ISOLATED
+  `.nimlsp_livecache`, which keeps `nimony check` incremental (~25ms/edit after
+  a one-time ~1s warm at file open). Runs synchronously on the stdio loop — fast
+  enough not to lag typing; no background threads.
 - Call hierarchy and go-to-type-definition use source-scan / single-module NIF
   heuristics, so cross-module overloads and deeply generic types can be missed.
 - The generation cache coalesces redundant checks within a request but is not yet

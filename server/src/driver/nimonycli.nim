@@ -68,3 +68,26 @@ proc run*(cfg: Config; sub: string; file: string; track: seq[string] = @[]): Che
 
 proc checkTrack*(cfg: Config; file: string; track: seq[string]): CheckResult =
   run(cfg, "check", file, track)
+
+proc runLiveCheck*(cfg: Config; file, nimcache: string): CheckResult =
+  ## Check `file` into a DEDICATED nimcache (for live/as-you-type diagnostics on
+  ## a temp buffer). Isolating the cache is what keeps this incremental & fast
+  ## (~10ms) — sharing the main nimcache makes every temp check a cold rebuild.
+  ## Uncached (never touches the generation cache) and never cross-contended.
+  if cfg.nimonyExe.len == 0 or not fileExists(cfg.nimonyExe):
+    return CheckResult(output: "", exitCode: 127)
+  var args = @["check", "--nimcache:" & nimcache]
+  for p in cfg.extraPaths: args.add("--path:" & p)
+  args.add file
+  let workdir = if cfg.projectRoot.len > 0 and dirExists(cfg.projectRoot): cfg.projectRoot
+                else: parentDir(file)
+  var p: Process
+  try:
+    p = startProcess(cfg.nimonyExe, workingDir = workdir, args = args,
+                     options = {poStdErrToStdOut})
+  except OSError:
+    return CheckResult(output: "", exitCode: 127)
+  let buf = p.outputStream.readAll()
+  let code = p.waitForExit()
+  p.close()
+  CheckResult(output: buf, exitCode: code)

@@ -178,10 +178,14 @@ alignment (codepoint==UTF-16) and centralize the conversion so we can harden lat
   for `object of <name>`.
 - `textDocument/declaration` aliases definition (Nimony has no separate
   declaration site).
-- **Live diagnostics**: a threaded worker (isolated `.nimlsp_livecache`,
-  coalesced) was prototyped and reverted — unstable at teardown. Diagnostics
-  stay open/save-based; the incremental check makes live feasible once a stable
-  async worker lands.
+- **Live diagnostics** (`refreshDiagnosticsLive` + `nimonycli.runLiveCheck`):
+  as-you-type checking of the UNSAVED buffer. The buffer is written to a stable
+  sibling temp (`nimlsp_live_<base>`) and checked into an ISOLATED nimcache
+  (`.nimlsp_livecache`) — isolation is what keeps `nimony check` incremental
+  (~25ms/edit; a one-time ~1s warm on didOpen). The temp's diagnostics are
+  remapped onto the real uri. Synchronous (no threads; a first threaded worker
+  was unstable at teardown and dropped once the isolated-cache check proved fast
+  enough). Temp cleaned on save/close/exit.
 
 ## Optional warm-daemon backend (v0.4)
 

@@ -15,3 +15,7 @@ _lsptmp/
 
 # OS
 .DS_Store
+
+# live-diagnostics temp artifacts
+nimlsp_live_*
+.nimlsp_livecache/

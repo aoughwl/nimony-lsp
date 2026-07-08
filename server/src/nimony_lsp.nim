@@ -14,7 +14,7 @@ import driver/[diagnostics, idetools, nifindex, nimonycli,
 
 const
   ServerName = "nimony-lsp"
-  ServerVersion = "0.6.0"
+  ServerVersion = "0.7.0"
 
 var gState = newServerState()
 var gOut = stdout
@@ -36,6 +36,48 @@ proc refreshDiagnostics(uri: string) =
     reported[pathToUri(absPath)] = true
   if not reported.hasKey(uri):
     publishDiagnostics(uri, @[])
+
+proc liveTempPath(realPath: string): string =
+  realPath.parentDir / ("nimlsp_live_" & extractFilename(realPath))
+
+proc cleanupLiveTemp(uri: string) =
+  let path = filePath(uri)
+  if path.len == 0: return
+  try:
+    let tmp = liveTempPath(path)
+    if fileExists(tmp): removeFile(tmp)
+  except CatchableError: discard
+
+proc refreshDiagnosticsLive(uri, text: string) =
+  ## As-you-type diagnostics on the UNSAVED buffer: materialize it to a stable
+  ## sibling temp file, run the checker into an ISOLATED nimcache (so it stays
+  ## incremental, ~10ms), and remap the temp's diagnostics onto `uri`.
+  ## Synchronous: the isolated-cache check is fast enough not to lag typing.
+  let path = filePath(uri)
+  if path.len == 0: return
+  let tmp = liveTempPath(path)
+  try:
+    writeFile(tmp, text)
+  except CatchableError:
+    return
+  let root = if gState.config.projectRoot.len > 0: gState.config.projectRoot
+             else: getCurrentDir()
+  let livecache = root / ".nimlsp_livecache"
+  let relTmp = if tmp.isAbsolute and gState.config.projectRoot.len > 0:
+                 relativePath(tmp, gState.config.projectRoot)
+               else: tmp
+  let r = nimonycli.runLiveCheck(gState.config, relTmp, livecache)
+  let byFile = parseOutput(gState.config, r.output)
+  let tmpUri = pathToUri(normalizedPath(tmp))
+  var publishedPrimary = false
+  for absPath, diags in byFile:
+    if pathToUri(normalizedPath(absPath)) == tmpUri:
+      publishDiagnostics(uri, diags)      # remap temp → real document uri
+      publishedPrimary = true
+    else:
+      publishDiagnostics(pathToUri(absPath), diags)
+  if not publishedPrimary:
+    publishDiagnostics(uri, @[])          # buffer is clean → clear
 
 # --------------------------------------------------------------------------
 # request handlers
@@ -247,7 +289,9 @@ proc handleDidOpen(params: JsonNode) =
   let uri = td{"uri"}.getStr
   gState.openDoc(uri, td{"languageId"}.getStr("nim"),
                  td{"version"}.getInt(0), td{"text"}.getStr(""))
-  refreshDiagnostics(uri)
+  # Use the live path from the start: publishes diagnostics AND warms the
+  # isolated live-cache, so the first edit is fast (~25ms) rather than cold.
+  refreshDiagnosticsLive(uri, td{"text"}.getStr(""))
 
 proc handleDidChange(params: JsonNode) =
   bumpCheckGeneration()
@@ -265,14 +309,19 @@ proc handleDidChange(params: JsonNode) =
         doc.applyChange(ver, getRange(rng), ch{"text"}.getStr(""))
       else:
         doc.update(ver, ch{"text"}.getStr(""))
+    refreshDiagnosticsLive(uri, doc.text)   # live as-you-type diagnostics
 
 proc handleDidSave(params: JsonNode) =
   bumpCheckGeneration()
-  refreshDiagnostics(textDocumentUri(params))
+  let uri = textDocumentUri(params)
+  cleanupLiveTemp(uri)                      # disk is current; drop the temp
+  refreshDiagnostics(uri)
 
 proc handleDidClose(params: JsonNode) =
   bumpCheckGeneration()
-  gState.closeDoc(textDocumentUri(params))
+  let uri = textDocumentUri(params)
+  cleanupLiveTemp(uri)
+  gState.closeDoc(uri)
 
 # --------------------------------------------------------------------------
 # dispatch
@@ -316,6 +365,7 @@ proc dispatchNotification(m: Message) =
   case m.meth
   of "initialized": discard
   of "exit":
+    for uri in gState.docs.keys: cleanupLiveTemp(uri)
     daemon.shutdown()
     quit(if gState.shutdownRequested: 0 else: 1)
   of "textDocument/didOpen": handleDidOpen(m.params)
