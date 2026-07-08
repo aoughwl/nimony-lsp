@@ -79,6 +79,20 @@ on `.` and `(`, signature help on `(` and `,`. A **generation-based cache**
 coalesces the many `nimony check` invocations a single editor request would
 otherwise trigger into one, invalidated on any document change.
 
+### Optional warm-daemon backend
+
+Definition, references, and workspace-symbol can be routed to a persistent
+`nimsem serve` worker instead of spawning `nimony check --def/--usages` per
+query. The daemon holds the whole-program interned symbol graph warm, so it
+resolves the **exact overload** at a call site (across module boundaries) and
+answers without re-checking. It is **opt-in and fails safe**: set
+`nimony.daemonPath` (or the `NIMONY_DAEMON` env / `daemonPath` init option) to a
+`nimsem serve` binary; every query falls back to the built-in idetools path when
+the daemon is unset, unavailable, or returns nothing. The daemon reads the
+`.s.nif` artifacts the server already maintains, so no extra build step is
+needed. Verbs implemented: `defs`, `usages`/`references`, `symbols`
+(`typeDefinition`/`callHierarchy` still use the in-process heuristics).
+
 ## Layout
 
 ```
@@ -109,7 +123,8 @@ nimony-lsp/
 │           ├── folding.nim     foldingRange: indentation / comments / imports
 │           ├── selection.nim   selectionRange: expand-selection hierarchy
 │           ├── callhierarchy.nim  prepare + incoming/outgoing calls
-│           └── extranav.nim    typeDefinition + implementation
+│           ├── extranav.nim    typeDefinition + implementation
+│           └── daemon.nim      optional `nimsem serve` client (defs/usages/symbols)
 ├── client/                     VSCode extension (TypeScript, vscode-languageclient)
 │   ├── package.json
 │   ├── src/extension.ts        spawns the server over stdio; status bar; restart command

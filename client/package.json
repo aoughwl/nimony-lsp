@@ -2,7 +2,7 @@
   "name": "nimony",
   "displayName": "Nimony",
   "description": "Language support for Nimony (the NIF-based Nim successor), powered by the nimony-lsp language server.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "nimony",
   "license": "MIT",
   "engines": {
@@ -73,6 +73,11 @@
           },
           "default": [],
           "description": "Additional module search paths passed to the Nimony compiler via the language server."
+        },
+        "nimony.daemonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional path to a `nimsem serve` binary. When set, definition / references / workspace-symbol are resolved by the persistent warm daemon (exact cross-module overload resolution, no per-query `nimony check`), falling back to the built-in idetools path on any miss. Empty = disabled."
         },
         "nimony.trace.server": {
           "type": "string",

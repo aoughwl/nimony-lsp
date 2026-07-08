@@ -64,6 +64,7 @@ function buildInitializationOptions(): Record<string, unknown> {
       "/home/savant/nimony/bin/nimony"
     ),
     extraPaths: config.get<string[]>("extraPaths", []),
+    daemonPath: config.get<string>("daemonPath", ""),
   };
 }
 
@@ -202,7 +203,8 @@ export async function activate(
       if (
         e.affectsConfiguration("nimony.serverPath") ||
         e.affectsConfiguration("nimony.nimonyPath") ||
-        e.affectsConfiguration("nimony.extraPaths")
+        e.affectsConfiguration("nimony.extraPaths") ||
+        e.affectsConfiguration("nimony.daemonPath")
       ) {
         await stopClient();
         await startClient(context);
