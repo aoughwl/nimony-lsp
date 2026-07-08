@@ -2,7 +2,7 @@
   "name": "nimony",
   "displayName": "Nimony",
   "description": "Language support for Nimony (the NIF-based Nim successor), powered by the nimony-lsp language server.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "nimony",
   "license": "MIT",
   "engines": {
@@ -104,5 +104,12 @@
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.75.0",
     "typescript": "^5.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aoughwl/nimony-lsp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aoughwl/nimony-lsp/issues"
   }
 }

@@ -52,6 +52,13 @@ proc demangle*(sym: string): string =
     let sn = splitSymName(sym)
     result = if sn.name.len > 0: sn.name else: sym
 
+proc isSynthName*(nm: string): bool =
+  ## True for compiler-synthesized decls that shouldn't appear in the outline:
+  ## lifecycle hooks (`=destroy`/`=copy`/…), the auto `$`/`==`/`hash` hooks
+  ## (which demangle to backtick/dotted junk like `` dollar`.Shape ``), and
+  ## anything whose demangled form isn't a clean symbol name.
+  nm.len == 0 or nm[0] == '=' or '`' in nm or '.' in nm
+
 proc classifyKind*(tagName: string): Option[SymbolKind] =
   case tagName
   of "proc", "func", "converter", "iterator", "macro", "template":
@@ -192,7 +199,7 @@ proc documentSymbols*(cfg: Config; file: string): seq[DocumentSymbol] =
           if d.kind == SymbolDef:
             let nm = demangle(pool.syms[d.symId])
             let (rng, ok) = mkSymRange(d.info, nm.len)
-            if ok and nm.len > 0:
+            if ok and not isSynthName(nm):
               var ds = DocumentSymbol(name: nm, kind: sk.get,
                                       `range`: rng, selectionRange: rng)
               if tn == "type":

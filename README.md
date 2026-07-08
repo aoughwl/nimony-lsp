@@ -65,13 +65,16 @@ binary through an LSP client harness and verified against `nimony` 0.4.0.
 | Document highlight | idetools occurrences in the file, read/write classified | ✅ |
 | Rename (+ prepareRename) | idetools references → cross-file `WorkspaceEdit` | ✅ |
 | Workspace symbol | name search across every `.s.nif` in `nimcache` | ✅ |
-| Semantic tokens (full) | NIF walk → typed legend + `declaration`/`readonly` modifiers | ✅ |
+| Semantic tokens (full + range) | NIF walk → typed legend + `declaration`/`readonly` modifiers | ✅ |
 | Inlay hints | inferred-type hints for un-annotated `let`/`var`/`const` | ✅ |
 | Folding ranges | indentation blocks, comment runs, import groups | ✅ |
 | Selection ranges | expand-selection: ident → brackets → line → blocks → file | ✅ |
 | Call hierarchy | prepare + incoming/outgoing (idetools + call-site scan) | ✅ |
 | Go to type definition | type of the symbol under the cursor (NIF type-slot) | ✅ |
 | Go to implementation | aliases definition (Nimony has no interface/impl split) | ✅ |
+| Document link | `import`/`from`/`include` → resolved module file | ✅ |
+| Code lens | "N references" above each top-level declaration | ✅ |
+| Inlay hints (parameters) | `paramName:` before positional call arguments (overload-aware) | ✅ |
 | Syntax highlighting | TextMate grammar (`source.nimony`) | ✅ |
 
 Text document sync is **incremental** (`textDocumentSync: 2`); completion triggers
@@ -132,6 +135,9 @@ nimony-lsp/
 │           ├── callhierarchy.nim  prepare + incoming/outgoing calls
 │           ├── extranav.nim    typeDefinition + implementation
 │           └── daemon.nim      optional `nimsem serve` client (defs/usages/symbols)
+│           ├── doclink.nim     documentLink: imports → module files
+│           ├── codelens.nim    codeLens: reference counts
+│           └── paramhints.nim  inlayHint: parameter names at call sites
 ├── client/                     VSCode extension (TypeScript, vscode-languageclient)
 │   ├── package.json
 │   ├── src/extension.ts        spawns the server over stdio; status bar; restart command
