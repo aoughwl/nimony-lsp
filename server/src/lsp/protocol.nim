@@ -155,6 +155,21 @@ type
     to*: CallHierarchyItem
     fromRanges*: seq[Range]
 
+  # ---- document link ----
+  DocumentLink* = object
+    `range`*: Range
+    target*: string           ## URI; omitted if ""
+    tooltip*: string          ## omitted if ""
+
+  # ---- code lens ----
+  Command* = object
+    title*: string
+    command*: string          ## command id; "" = display-only title
+
+  CodeLens* = object
+    `range`*: Range
+    command*: Command
+
 const
   ## Fixed legend shared by the semanticTokens capability and semtokens.nim.
   ## Producers MUST emit indices into these two arrays.
@@ -295,6 +310,17 @@ proc `%`*(c: CallHierarchyOutgoingCall): JsonNode =
   var fr = newJArray()
   for r in c.fromRanges: fr.add(%r)
   %*{"to": %c.to, "fromRanges": fr}
+
+proc `%`*(d: DocumentLink): JsonNode =
+  result = %*{"range": %d.`range`}
+  if d.target.len > 0: result["target"] = %d.target
+  if d.tooltip.len > 0: result["tooltip"] = %d.tooltip
+
+proc `%`*(c: Command): JsonNode =
+  result = %*{"title": c.title, "command": c.command}
+
+proc `%`*(c: CodeLens): JsonNode =
+  %*{"range": %c.`range`, "command": %c.command}
 
 proc toJsonArray*[T](xs: seq[T]): JsonNode =
   result = newJArray()
