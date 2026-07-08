@@ -53,11 +53,14 @@ proc demangle*(sym: string): string =
     result = if sn.name.len > 0: sn.name else: sym
 
 proc isSynthName*(nm: string): bool =
-  ## True for compiler-synthesized decls that shouldn't appear in the outline:
-  ## lifecycle hooks (`=destroy`/`=copy`/…), the auto `$`/`==`/`hash` hooks
-  ## (which demangle to backtick/dotted junk like `` dollar`.Shape ``), and
-  ## anything whose demangled form isn't a clean symbol name.
-  nm.len == 0 or nm[0] == '=' or '`' in nm or '.' in nm
+  ## True for compiler-synthesized decls that shouldn't appear in the outline or
+  ## completion: lifecycle hooks (`=destroy`/`=copy`/`=sink`/… = `=` followed by
+  ## a lowercase letter) and the auto `$`/`hash` hooks (which demangle to
+  ## backtick/dotted junk like `` dollar`.Shape ``). Real operators (`==`, `<=`,
+  ## `+=`, user-defined `+`) are kept — only `=<letter>` and backtick/dot junk go.
+  if nm.len == 0: return true
+  if '`' in nm or '.' in nm: return true
+  result = nm[0] == '=' and nm.len >= 2 and nm[1] in {'a'..'z'}
 
 proc classifyKind*(tagName: string): Option[SymbolKind] =
   case tagName
@@ -390,7 +393,7 @@ proc addImportedExports(cfg: Config; buf: var TokenBuf;
       for sym, entry in tbl:
         if entry.vis != Exported: continue
         let nm = demangle(sym)
-        if nm.len == 0 or nm in seen: continue
+        if nm.len == 0 or nm in seen or isSynthName(nm): continue
         seen.incl nm
         items.add CompletionItem(label: nm, kind: cikFunction)
     except CatchableError:

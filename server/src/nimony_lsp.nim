@@ -14,7 +14,7 @@ import driver/[diagnostics, idetools, nifindex, nimonycli,
 
 const
   ServerName = "nimony-lsp"
-  ServerVersion = "0.7.0"
+  ServerVersion = "0.7.1"
 
 var gState = newServerState()
 var gOut = stdout
