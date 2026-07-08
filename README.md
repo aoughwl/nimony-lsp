@@ -61,15 +61,20 @@ binary through an LSP client harness and verified against `nimony` 0.4.0.
 | Hover | in-process NIF resolution → multi-line signature + doc comment | ✅ |
 | Document symbols | in-process `.s.nif` top-level walk (types carry field children) | ✅ |
 | Completion | module + imported `.s.idx.nif` exports; **dot-context member completion** (fields + UFCS methods) on the live buffer | ✅ |
-| Signature help | enclosing-call parse → idetools → parameter list + active parameter | ✅ |
+| Signature help | enclosing-call parse → all callee overloads, resolved one active | ✅ |
 | Document highlight | idetools occurrences in the file, read/write classified | ✅ |
 | Rename (+ prepareRename) | idetools references → cross-file `WorkspaceEdit` | ✅ |
 | Workspace symbol | name search across every `.s.nif` in `nimcache` | ✅ |
-| Semantic tokens (full) | NIF walk → typed token legend, delta-encoded | ✅ |
+| Semantic tokens (full) | NIF walk → typed legend + `declaration`/`readonly` modifiers | ✅ |
 | Inlay hints | inferred-type hints for un-annotated `let`/`var`/`const` | ✅ |
+| Folding ranges | indentation blocks, comment runs, import groups | ✅ |
+| Selection ranges | expand-selection: ident → brackets → line → blocks → file | ✅ |
+| Call hierarchy | prepare + incoming/outgoing (idetools + call-site scan) | ✅ |
+| Go to type definition | type of the symbol under the cursor (NIF type-slot) | ✅ |
+| Go to implementation | aliases definition (Nimony has no interface/impl split) | ✅ |
 | Syntax highlighting | TextMate grammar (`source.nimony`) | ✅ |
 
-Text document sync is full-document (`textDocumentSync: 1`); completion triggers
+Text document sync is **incremental** (`textDocumentSync: 2`); completion triggers
 on `.` and `(`, signature help on `(` and `,`. A **generation-based cache**
 coalesces the many `nimony check` invocations a single editor request would
 otherwise trigger into one, invalidated on any document change.
@@ -99,8 +104,12 @@ nimony-lsp/
 │           ├── highlight.nim   documentHighlight: in-file occurrences, read/write
 │           ├── rename.nim      prepareRename + rename → WorkspaceEdit
 │           ├── workspacesym.nim workspace/symbol: name search over nimcache
-│           ├── semtokens.nim   semanticTokens/full: NIF walk → token legend
-│           └── inlay.nim       inlayHint: inferred-type hints
+│           ├── semtokens.nim   semanticTokens/full: NIF walk → token legend + modifiers
+│           ├── inlay.nim       inlayHint: inferred-type hints
+│           ├── folding.nim     foldingRange: indentation / comments / imports
+│           ├── selection.nim   selectionRange: expand-selection hierarchy
+│           ├── callhierarchy.nim  prepare + incoming/outgoing calls
+│           └── extranav.nim    typeDefinition + implementation
 ├── client/                     VSCode extension (TypeScript, vscode-languageclient)
 │   ├── package.json
 │   ├── src/extension.ts        spawns the server over stdio; status bar; restart command
@@ -241,12 +250,13 @@ only apply the 0/1-based line/col shift.
 
 Current, honest edges — none block day-to-day use:
 
-- Text sync is full-document rather than incremental.
 - Diagnostics run on open/save (not per keystroke): `nimony` has no dirty-buffer
-  mechanism and `check` is whole-project, so live-as-you-type checking would need
-  an async worker. Navigation, hover, symbols, and semantic tokens read the
-  **saved** file; the one exception is **member completion**, which resolves the
-  live buffer via a throwaway temp compile.
+  mechanism and `check` is whole-project, so live-as-you-type checking needs an
+  async worker (planned — see below). Navigation, hover, symbols, and semantic
+  tokens read the **saved** file; the exceptions are **member completion** and
+  the **document buffer** (incremental sync), which use the live text.
+- Call hierarchy and go-to-type-definition use source-scan / single-module NIF
+  heuristics, so cross-module overloads and deeply generic types can be missed.
 - The generation cache coalesces redundant checks within a request but is not yet
   a persistent index, so large modules still re-check after an edit.
 - Some type-usage references are missed because `idetools` type-use resolution is

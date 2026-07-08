@@ -2,7 +2,7 @@
   "name": "nimony",
   "displayName": "Nimony",
   "description": "Language support for Nimony (the NIF-based Nim successor), powered by the nimony-lsp language server.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "nimony",
   "license": "MIT",
   "engines": {

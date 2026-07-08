@@ -25,6 +25,7 @@ proc newDocument*(uri, languageId: string; version: int; text: string): Document
            text: text, lineStarts: computeLineStarts(text))
 
 proc update*(d: Document; version: int; text: string) =
+  ## Full-document replacement (full-sync path).
   d.version = version
   d.text = text
   d.lineStarts = computeLineStarts(text)
@@ -54,6 +55,16 @@ proc offsetAt*(d: Document; pos: Position): int =
     utf16 += (if r.int32 > 0xFFFF: 2 else: 1)
     i += sz
   result = i
+
+proc applyChange*(d: Document; version: int; r: Range; newText: string) =
+  ## Incremental change: splice `newText` over the byte span the LSP `range`
+  ## denotes. `offsetAt` clamps out-of-range input, so this is safe against a
+  ## client that sends a stale range.
+  let startOff = d.offsetAt(r.start)
+  let endOff = max(startOff, d.offsetAt(r.`end`))
+  d.text = d.text[0 ..< startOff] & newText & d.text[endOff .. ^1]
+  d.version = version
+  d.lineStarts = computeLineStarts(d.text)
 
 proc positionAt*(d: Document; offset: int): Position =
   ## LSP position for a byte offset in `d.text`.

@@ -148,6 +148,28 @@ alignment (codepoint==UTF-16) and centralize the conversion so we can harden lat
 - `driver/inlay.nim` — `inlayHints(cfg, doc, range)`: `let`/`var`/`const` with no
   source `:` annotation → `: <inferred type>` from the NIF type slot.
 
+## v0.3 feature drivers
+
+- `server/documents.nim` — `applyChange(doc, ver, range, newText)` splices an
+  incremental edit; the server advertises `textDocumentSync: 2` and applies each
+  contentChange (ranged or whole-document) in order.
+- `driver/folding.nim` — `foldingRanges(cfg, doc)`: source-based indentation
+  blocks + contiguous comment runs + import groups.
+- `driver/selection.nim` — `selectionRanges(cfg, doc, positions)`: per position,
+  an outward-growing `SelectionRange` chain (identifier → brackets → line →
+  indentation blocks → file).
+- `driver/callhierarchy.nim` — `prepareCallHierarchy` / `incomingCalls` /
+  `outgoingCalls`: idetools references grouped by the enclosing routine (found by
+  upward indentation scan); outgoing = call sites in the routine body resolved
+  via idetools.
+- `driver/extranav.nim` — `typeDefinition` walks the NIF type slot of the
+  symbol's decl and locates that type's `type` decl (current module, then other
+  artifacts); `implementation` aliases `idetools.definition`.
+- `driver/semtokens.nim` — now emits `declaration` (on SymbolDef sites) and
+  `readonly` (const/let/…) token modifiers.
+- `driver/signature.nim` — returns every overload of the callee found in the
+  definition file, with the idetools-resolved one marked `activeSignature`.
+
 ## Build
 
 Server: `cd server && nimble build` -> `server/bin/nimony-lsp`.

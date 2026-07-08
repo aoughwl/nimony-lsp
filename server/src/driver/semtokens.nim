@@ -12,7 +12,7 @@
 ## server advertises that same legend in its capabilities.  Everything is
 ## wrapped defensively: any failure yields an empty result.
 
-import std/[os, strutils, tables, algorithm]
+import std/[os, strutils, tables, algorithm, sets]
 import ../lsp/protocol
 import ../lsp/uris
 import ../server/state
@@ -36,6 +36,14 @@ const
   tyProperty  = SemanticTokenTypes.find("property")
   tyEnumMember = SemanticTokenTypes.find("enumMember")
   tyParameter = SemanticTokenTypes.find("parameter")
+
+  # Token-modifier bit masks (index into the shared modifier legend).
+  modDeclaration = 1 shl SemanticTokenModifiers.find("declaration")
+  modReadonly    = 1 shl SemanticTokenModifiers.find("readonly")
+
+proc readonlyTag(tagName: string): bool =
+  ## Immutable value declarations. `var`/`gvar`/`tvar` are mutable.
+  tagName in ["const", "let", "glet", "tlet", "cursor"]
 
 proc declType(tagName: string): int =
   ## Legend index a declaration tag maps its declared symbol to, or -1 if the
@@ -139,29 +147,37 @@ proc ensureArtifact(cfg: Config; file: string): string =
 
 type
   RawTok = object
-    line, col, length, ttype: int
+    line, col, length, ttype, mods: int
 
-proc buildSymTypes(buf: var TokenBuf): Table[string, int] =
-  ## PASS 1: map each declared symbol (mangled name) to its legend index.
+proc buildSymTypes(buf: var TokenBuf; readonly: var HashSet[string]): Table[string, int] =
+  ## PASS 1: map each declared symbol (mangled name) to its legend index, and
+  ## record which symbols are read-only (declared const/let/...).
   result = initTable[string, int]()
   var n = beginRead(buf)
   var pending = -1               # legend index awaiting the next SymbolDef
+  var pendingRo = false          # is the pending decl read-only?
   var left = buf.len             # bound: the cursor has no EofToken sentinel
   while left > 0 and n.kind != EofToken:
     case n.kind
     of ParLe:
-      pending = declType(pool.tags[n.tagId])
+      let tn = pool.tags[n.tagId]
+      pending = declType(tn)
+      pendingRo = readonlyTag(tn)
     of SymbolDef:
       if pending >= 0:
         result[pool.syms[n.symId]] = pending
+        if pendingRo: readonly.incl pool.syms[n.symId]
       pending = -1
+      pendingRo = false
     else:
       pending = -1
+      pendingRo = false
     inc n
     dec left
 
 proc collectTokens(buf: var TokenBuf; file: string;
-                   symType: Table[string, int]): seq[RawTok] =
+                   symType: Table[string, int];
+                   readonly: HashSet[string]): seq[RawTok] =
   ## PASS 2: emit a raw token for every Symbol / SymbolDef in `file`.
   result = @[]
   var n = beginRead(buf)
@@ -176,9 +192,12 @@ proc collectTokens(buf: var TokenBuf; file: string;
           let nm = demangle(sym)
           if nm.len > 0:
             let t = symType.getOrDefault(sym, tyVariable)
+            var mods = 0
+            if n.kind == SymbolDef: mods = mods or modDeclaration
+            if sym in readonly: mods = mods or modReadonly
             result.add RawTok(line: int(up.line) - 1,
                               col: max(0, int(up.col)),
-                              length: nm.len, ttype: t)
+                              length: nm.len, ttype: t, mods: mods)
     inc n
     dec left
 
@@ -202,7 +221,7 @@ proc encode(raws: seq[RawTok]): seq[int] =
     result.add dc
     result.add r.length
     result.add r.ttype
-    result.add 0                 # tokenModifiers bitset
+    result.add r.mods            # tokenModifiers bitset
     prevLine = r.line
     prevCol = r.col
     haveLine = r.line
@@ -226,8 +245,9 @@ proc semanticTokensFull*(cfg: Config; doc: Document): SemanticTokens =
       buf = fromStream(s)
     finally:
       nifstreams.close s
-    let symType = buildSymTypes(buf)
-    let raws = collectTokens(buf, file, symType)
+    var readonly = initHashSet[string]()
+    let symType = buildSymTypes(buf, readonly)
+    let raws = collectTokens(buf, file, symType, readonly)
     result = SemanticTokens(data: encode(raws))
   except CatchableError:
     return SemanticTokens(data: @[])

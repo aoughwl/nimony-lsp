@@ -13,7 +13,7 @@ import driver/[diagnostics, idetools, nifindex, nimonycli,
 
 const
   ServerName = "nimony-lsp"
-  ServerVersion = "0.2.0"
+  ServerVersion = "0.3.0"
 
 var gState = newServerState()
 var gOut = stdout
@@ -59,7 +59,7 @@ proc handleInitialize(params: JsonNode): JsonNode =
   for m in SemanticTokenModifiers: tokenMods.add(%m)
   result = %*{
     "capabilities": {
-      "textDocumentSync": {"openClose": true, "change": 1, "save": {"includeText": false}},
+      "textDocumentSync": {"openClose": true, "change": 2, "save": {"includeText": false}},
       "definitionProvider": true,
       "referencesProvider": true,
       "hoverProvider": true,
@@ -207,10 +207,15 @@ proc handleDidChange(params: JsonNode) =
   if doc == nil: return
   let changes = params{"contentChanges"}
   if changes != nil and changes.kind == JArray and changes.len > 0:
-    # full sync: last change carries the whole document
-    let last = changes[changes.len - 1]
-    doc.update(params{"textDocument", "version"}.getInt(doc.version + 1),
-               last{"text"}.getStr(""))
+    let ver = params{"textDocument", "version"}.getInt(doc.version + 1)
+    # Apply each change in order. A change with a `range` is incremental; one
+    # without is a whole-document replacement (client's choice per change).
+    for ch in changes:
+      let rng = ch{"range"}
+      if rng != nil:
+        doc.applyChange(ver, getRange(rng), ch{"text"}.getStr(""))
+      else:
+        doc.update(ver, ch{"text"}.getStr(""))
 
 proc handleDidSave(params: JsonNode) =
   bumpCheckGeneration()
