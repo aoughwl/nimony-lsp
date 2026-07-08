@@ -10,7 +10,7 @@ import server/[state, documents]
 import driver/[diagnostics, idetools, nifindex, nimonycli,
                signature, highlight, rename, workspacesym, semtokens, inlay,
                folding, selection, callhierarchy, extranav, daemon,
-               doclink, codelens, paramhints]
+               doclink, codelens, paramhints, typehierarchy]
 
 const
   ServerName = "nimony-lsp"
@@ -78,6 +78,8 @@ proc handleInitialize(params: JsonNode): JsonNode =
       "callHierarchyProvider": true,
       "typeDefinitionProvider": true,
       "implementationProvider": true,
+      "declarationProvider": true,
+      "typeHierarchyProvider": true,
       "documentLinkProvider": {"resolveProvider": false},
       "codeLensProvider": {"resolveProvider": false},
       "semanticTokensProvider": {
@@ -184,6 +186,22 @@ proc handleCodeLens(params: JsonNode): JsonNode =
   if doc == nil: return newJArray()
   toJsonArray(codelens.codeLenses(gState.config, doc))
 
+proc handleDeclaration(params: JsonNode): JsonNode =
+  # Nimony has no separate declaration/definition split; alias definition.
+  handleDefinition(params)
+
+proc handlePrepareTypeHierarchy(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJNull()
+  let items = typehierarchy.prepareTypeHierarchy(gState.config, doc, positionParam(params))
+  if items.len == 0: newJNull() else: toJsonArray(items)
+
+proc handleSupertypes(params: JsonNode): JsonNode =
+  toJsonArray(typehierarchy.supertypes(gState.config, typeHierarchyItemParam(params)))
+
+proc handleSubtypes(params: JsonNode): JsonNode =
+  toJsonArray(typehierarchy.subtypes(gState.config, typeHierarchyItemParam(params)))
+
 proc handleFoldingRange(params: JsonNode): JsonNode =
   let doc = gState.getDoc(textDocumentUri(params))
   if doc == nil: return newJArray()
@@ -280,6 +298,10 @@ proc dispatchRequest(m: Message): JsonNode =
   of "textDocument/semanticTokens/range": response(m.id, handleSemanticTokensFull(m.params))
   of "textDocument/documentLink": response(m.id, handleDocumentLink(m.params))
   of "textDocument/codeLens": response(m.id, handleCodeLens(m.params))
+  of "textDocument/declaration": response(m.id, handleDeclaration(m.params))
+  of "textDocument/prepareTypeHierarchy": response(m.id, handlePrepareTypeHierarchy(m.params))
+  of "typeHierarchy/supertypes": response(m.id, handleSupertypes(m.params))
+  of "typeHierarchy/subtypes": response(m.id, handleSubtypes(m.params))
   of "workspace/symbol": response(m.id, handleWorkspaceSymbol(m.params))
   of "textDocument/foldingRange": response(m.id, handleFoldingRange(m.params))
   of "textDocument/selectionRange": response(m.id, handleSelectionRange(m.params))

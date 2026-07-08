@@ -170,6 +170,15 @@ type
     `range`*: Range
     command*: Command
 
+  # ---- type hierarchy ----
+  TypeHierarchyItem* = object
+    name*: string
+    kind*: SymbolKind
+    detail*: string
+    uri*: string
+    `range`*: Range
+    selectionRange*: Range
+
 const
   ## Fixed legend shared by the semanticTokens capability and semtokens.nim.
   ## Producers MUST emit indices into these two arrays.
@@ -322,6 +331,11 @@ proc `%`*(c: Command): JsonNode =
 proc `%`*(c: CodeLens): JsonNode =
   %*{"range": %c.`range`, "command": %c.command}
 
+proc `%`*(it: TypeHierarchyItem): JsonNode =
+  result = %*{"name": it.name, "kind": ord(it.kind), "uri": it.uri,
+              "range": %it.`range`, "selectionRange": %it.selectionRange}
+  if it.detail.len > 0: result["detail"] = %it.detail
+
 proc toJsonArray*[T](xs: seq[T]): JsonNode =
   result = newJArray()
   for x in xs: result.add(%x)
@@ -371,6 +385,20 @@ proc selectionPositions*(params: JsonNode): seq[Position] =
   let ps = params{"positions"}
   if ps != nil and ps.kind == JArray:
     for p in ps: result.add getPosition(p)
+
+proc typeHierarchyItemParam*(params: JsonNode): TypeHierarchyItem =
+  ## params.item (for typeHierarchy/supertypes & subtypes)
+  if params == nil: return
+  let it = params{"item"}
+  if it == nil: return
+  result.name = it{"name"}.getStr("")
+  result.uri = it{"uri"}.getStr("")
+  result.detail = it{"detail"}.getStr("")
+  let k = it{"kind"}.getInt(5)
+  if k >= ord(low(SymbolKind)) and k <= ord(high(SymbolKind)):
+    result.kind = SymbolKind(k)
+  result.`range` = getRange(it{"range"})
+  result.selectionRange = getRange(it{"selectionRange"})
 
 proc callHierarchyItemParam*(params: JsonNode): CallHierarchyItem =
   ## params.item (for callHierarchy/incomingCalls & outgoingCalls)
