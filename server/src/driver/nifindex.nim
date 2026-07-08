@@ -422,6 +422,22 @@ proc typeSlotName(start: Cursor): string =
   if t.kind == Symbol:
     result = demangle(pool.syms[t.symId])
 
+proc typeSlotSym(start: Cursor): string =
+  ## Like `typeSlotName`, but returns the RAW (mangled) type symbol, e.g.
+  ## `Circle.0.shakc8bms` — which carries the defining-module suffix so we can
+  ## find where the type (and its methods) actually live.
+  result = ""
+  var t = start
+  inc t
+  if t.kind != SymbolDef: return ""
+  skip t
+  if t.kind == ParRi: return ""
+  skip t
+  if t.kind == ParRi: return ""
+  skip t
+  if t.kind == Symbol:
+    result = pool.syms[t.symId]
+
 proc scanVarType(buf: var TokenBuf; name: string): string =
   ## Find any var/let/const declaration named `name` and return its type name.
   result = ""
@@ -436,6 +452,27 @@ proc scanVarType(buf: var TokenBuf; name: string): string =
         if t.kind == SymbolDef and demangle(pool.syms[t.symId]) == name:
           let tn = typeSlotName(n)
           if tn.len > 0: return tn
+      inc depth; inc n
+    of ParRi:
+      dec depth; inc n
+      if depth <= 0: break
+    of EofToken: break
+    else: inc n
+
+proc scanVarTypeSym(buf: var TokenBuf; name: string): string =
+  ## Like `scanVarType` but returns the RAW type symbol (with module suffix).
+  result = ""
+  var n = beginRead(buf)
+  var depth = 0
+  while true:
+    case n.kind
+    of ParLe:
+      if pool.tags[n.tagId] in VarTags:
+        var t = n
+        inc t
+        if t.kind == SymbolDef and demangle(pool.syms[t.symId]) == name:
+          let ts = typeSlotSym(n)
+          if ts.len > 0: return ts
       inc depth; inc n
     of ParRi:
       dec depth; inc n
@@ -463,6 +500,51 @@ proc collectTypeFields(buf: var TokenBuf; typeName: string): seq[DocumentSymbol]
     of EofToken: break
     else: inc n
 
+proc objectBaseSym(typeCursor: Cursor): string =
+  ## Raw base symbol of a `type … = object of Base` decl (the `of Base` Symbol),
+  ## or "" for a base-less object / non-object type.
+  result = ""
+  var c = typeCursor
+  var depth = 0
+  while true:
+    case c.kind
+    of ParLe:
+      if pool.tags[c.tagId] == "object":
+        var o = c
+        inc o
+        if o.kind == Symbol: return pool.syms[o.symId]
+        return ""
+      inc depth; inc c
+    of ParRi:
+      dec depth; inc c
+      if depth <= 0: break
+    of EofToken: break
+    else: inc c
+
+proc collectTypeFieldsBySym(buf: var TokenBuf; typeSym: string;
+                            baseSym: var string): seq[DocumentSymbol] =
+  ## Fields of the `type` decl whose full symbol is `typeSym`. Also reports its
+  ## `object of Base` base symbol via `baseSym` (for inherited-member walks).
+  result = @[]
+  baseSym = ""
+  var n = beginRead(buf)
+  var depth = 0
+  while true:
+    case n.kind
+    of ParLe:
+      if pool.tags[n.tagId] == "type":
+        var t = n
+        inc t
+        if t.kind == SymbolDef and pool.syms[t.symId] == typeSym:
+          baseSym = objectBaseSym(n)
+          return collectFields(n)
+      inc depth; inc n
+    of ParRi:
+      dec depth; inc n
+      if depth <= 0: break
+    of EofToken: break
+    else: inc n
+
 proc firstParamType(procCursor: Cursor): string =
   ## Type name of a routine's first parameter (UFCS receiver), or "".
   result = ""
@@ -473,6 +555,23 @@ proc firstParamType(procCursor: Cursor): string =
     of ParLe:
       if pool.tags[c.tagId] == "param":
         return typeSlotName(c)
+      inc depth; inc c
+    of ParRi:
+      dec depth; inc c
+      if depth <= 0: break
+    of EofToken: break
+    else: inc c
+
+proc firstParamTypeSym(procCursor: Cursor): string =
+  ## Raw (suffix-qualified) type symbol of a routine's first parameter, or "".
+  result = ""
+  var c = procCursor
+  var depth = 0
+  while true:
+    case c.kind
+    of ParLe:
+      if pool.tags[c.tagId] == "param":
+        return typeSlotSym(c)
       inc depth; inc c
     of ParRi:
       dec depth; inc c
@@ -502,6 +601,30 @@ proc collectUfcsMethods(buf: var TokenBuf; typeName: string): seq[CompletionItem
     of EofToken: break
     else: inc n
 
+proc collectUfcsMethodsBySym(buf: var TokenBuf; typeSym: string): seq[CompletionItem] =
+  ## Routines whose FIRST parameter's full type symbol is `typeSym` — the UFCS
+  ## methods callable as `receiver.method(...)`, wherever they are defined.
+  result = @[]
+  var n = beginRead(buf)
+  var depth = 0
+  while true:
+    case n.kind
+    of ParLe:
+      if pool.tags[n.tagId] in RoutineTags:
+        var t = n
+        inc t
+        if t.kind == SymbolDef:
+          let pname = demangle(pool.syms[t.symId])
+          if pname.len > 0 and not isSynthName(pname) and
+             firstParamTypeSym(n) == typeSym:
+            result.add CompletionItem(label: pname, kind: cikMethod)
+      inc depth; inc n
+    of ParRi:
+      dec depth; inc n
+      if depth <= 0: break
+    of EofToken: break
+    else: inc n
+
 proc dotMemberCompletions(cfg: Config; file: string; pos: Position;
                           bufText: string): Option[seq[CompletionItem]] =
   ## If `pos` is in `<ident>.` member-access context AND we can resolve the
@@ -519,16 +642,28 @@ proc dotMemberCompletions(cfg: Config; file: string; pos: Position;
   let line = lines[pos.line]
   let ci = pos.character
   if ci <= 0 or ci > line.len: return none(seq[CompletionItem])
-  if line[ci - 1] != '.': return none(seq[CompletionItem])
+  # Cursor may sit after a partial member name (`c.ra|`), not only right after
+  # the dot (`c.|`). Scan the partial back to the dot.
+  var ps = ci
+  while ps > 0 and line[ps - 1] in IdChars: dec ps
+  if ps == 0 or line[ps - 1] != '.': return none(seq[CompletionItem])
+  let dotPos = ps - 1
   # Base identifier immediately before the dot.
-  var b = ci - 1
+  var b = dotPos
   while b > 0 and line[b - 1] in IdChars: dec b
-  let base = line[b ..< ci - 1]
+  let base = line[b ..< dotPos]
   if base.len == 0: return none(seq[CompletionItem])
-  # Repair the in-progress line (drop the trailing `.<partial>`) so the buffer
-  # parses, then compile that temp file to resolve the base's type.
+  # Repair the in-progress line so the buffer semchecks (a failed semcheck emits
+  # no `.s.nif`, which would silently drop us to the global fallback). Drop the
+  # trailing `.<partial>`; if that leaves the base as a bare expression statement
+  # (which nimony rejects as "must be used/discarded"), wrap it in `discard` so
+  # the base is still typed. Keep any leading assignment/call context intact.
   var repaired = lines
-  repaired[pos.line] = line[0 ..< ci - 1]
+  let prefix = line[0 ..< b]
+  if prefix.strip.len == 0:
+    repaired[pos.line] = prefix & "discard " & base
+  else:
+    repaired[pos.line] = line[0 ..< dotPos]
   let dir = if file.isAbsolute: parentDir(file) else: getCurrentDir()
   let tmp = dir / ("nimlsp_dot_" & $getCurrentProcessId() & ".nim")
   # Snapshot nimcache so we can delete exactly the artifacts this temp compile
@@ -555,25 +690,68 @@ proc dotMemberCompletions(cfg: Config; file: string; pos: Position;
     return none(seq[CompletionItem])
   var items: seq[CompletionItem] = @[]
   var seen = initHashSet[string]()
-  try:
-    var s = nifstreams.open(nifPath)
-    var buf: TokenBuf
+  proc loadBuf(p: string): TokenBuf =
+    var s = nifstreams.open(p)
     try:
       discard processDirectives(s.r)
-      buf = fromStream(s)
+      result = fromStream(s)
     finally:
       nifstreams.close s
-    let typeName = scanVarType(buf, base)
-    if typeName.len > 0:
-      for ds in collectTypeFields(buf, typeName):
-        if ds.name.len > 0 and ds.name notin seen:
-          seen.incl ds.name
-          items.add CompletionItem(label: ds.name,
-                                   kind: toCompletionKind(ds.kind))
-      for it in collectUfcsMethods(buf, typeName):
-        if it.label.len > 0 and it.label notin seen:
-          seen.incl it.label
-          items.add it
+  try:
+    var buf = loadBuf(nifPath)
+    # Resolve the receiver's fully-qualified type symbol (carries the defining
+    # module suffix). The type declaration and its UFCS methods usually live in
+    # a *different* module (the imported one), so we scan every module artifact
+    # for members matching this symbol — not just the current buffer.
+    let typeSym = scanVarTypeSym(buf, base)
+    if typeSym.len > 0:
+      # Walk the inheritance chain (Circle -> Shape -> RootObj): members of every
+      # supertype are also accessible on the receiver. `chain` is the set of type
+      # symbols to gather fields + UFCS methods for.
+      var chain: seq[string] = @[typeSym]
+      var chainSet = initHashSet[string]()
+      chainSet.incl typeSym
+      var files: seq[string] = @[]
+      for f in walkFiles(ncdir / "*.s.nif"): files.add f
+      var i = 0
+      while i < chain.len and chain.len < 32:
+        let cur = chain[i]; inc i
+        for f in files:
+          var mbuf: TokenBuf
+          try: mbuf = loadBuf(f)
+          except CatchableError: continue
+          var baseSym = ""
+          for ds in collectTypeFieldsBySym(mbuf, cur, baseSym):
+            if ds.name.len > 0 and not isSynthName(ds.name) and ds.name notin seen:
+              seen.incl ds.name
+              items.add CompletionItem(label: ds.name, kind: toCompletionKind(ds.kind))
+          if baseSym.len > 0 and baseSym notin chainSet and
+             demangle(baseSym) != "RootObj":
+            chainSet.incl baseSym
+            chain.add baseSym
+      # UFCS methods whose first parameter is any type in the chain.
+      for f in files:
+        var mbuf: TokenBuf
+        try: mbuf = loadBuf(f)
+        except CatchableError: continue
+        for sym in chain:
+          for it in collectUfcsMethodsBySym(mbuf, sym):
+            if it.label.len > 0 and it.label notin seen:
+              seen.incl it.label
+              items.add it
+    else:
+      # Fallback: type couldn't be resolved to a qualified symbol (e.g. a local
+      # or generic) — try same-buffer, name-based resolution.
+      let typeName = scanVarType(buf, base)
+      if typeName.len > 0:
+        for ds in collectTypeFields(buf, typeName):
+          if ds.name.len > 0 and ds.name notin seen:
+            seen.incl ds.name
+            items.add CompletionItem(label: ds.name, kind: toCompletionKind(ds.kind))
+        for it in collectUfcsMethods(buf, typeName):
+          if it.label.len > 0 and it.label notin seen:
+            seen.incl it.label
+            items.add it
   except CatchableError:
     discard
   cleanup()

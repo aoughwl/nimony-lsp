@@ -153,7 +153,13 @@ proc handleReferences(params: JsonNode): JsonNode =
   var locs: seq[Location]
   let d = daemon.references(gState.config, filePath(uri), pos)
   if d.isSome and d.get.len > 0: locs = d.get
-  else: locs = idetools.references(gState.config, filePath(uri), pos)
+  else:
+    # Pass every open document as an extra compilation root so usages in other
+    # modules (which idetools only sees when their unit is compiled) are found.
+    var roots: seq[string]
+    for docUri in gState.docs.keys:
+      if docUri != uri: roots.add(filePath(docUri))
+    locs = idetools.references(gState.config, filePath(uri), pos, roots)
   toJsonArray(locs)
 
 proc handleHover(params: JsonNode): JsonNode =
