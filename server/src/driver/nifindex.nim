@@ -407,6 +407,25 @@ const VarTags = ["let", "var", "glet", "gvar", "tlet", "tvar", "cursor", "const"
 const RoutineTags = ["proc", "func", "method", "template", "macro",
                      "converter", "iterator"]
 
+proc builtinTypeName(start: Cursor): string =
+  ## Readable name for a builtin type-constructor node, e.g. `(f 64)` -> "float",
+  ## `(i 32)` -> "int32", `(c 8)` -> "char". "" if not a recognised builtin.
+  if start.kind != ParLe: return ""
+  let tag = pool.tags[start.tagId]
+  var bits = 0
+  var b = start
+  inc b
+  if b.kind == IntLit:
+    try: bits = int(pool.integers[b.intId])
+    except CatchableError: bits = 0
+  case tag
+  of "i": (if bits == 0 or bits == 64: "int" else: "int" & $bits)
+  of "u": (if bits == 0 or bits == 64: "uint" else: "uint" & $bits)
+  of "f": (if bits == 0 or bits == 64: "float" else: "float" & $bits)
+  of "c": "char"
+  of "bool": "bool"
+  else: ""
+
 proc typeSlotName(start: Cursor): string =
   ## Given a cursor at a var/param ParLe, return the demangled name of its
   ## declared TYPE (slot layout: symdef, export, pragmas, TYPE, value).
@@ -421,6 +440,8 @@ proc typeSlotName(start: Cursor): string =
   skip t                                   # past pragmas
   if t.kind == Symbol:
     result = demangle(pool.syms[t.symId])
+  elif t.kind == ParLe:
+    result = builtinTypeName(t)
 
 proc typeSlotSym(start: Cursor): string =
   ## Like `typeSlotName`, but returns the RAW (mangled) type symbol, e.g.
@@ -538,6 +559,55 @@ proc collectTypeFieldsBySym(buf: var TokenBuf; typeSym: string;
         if t.kind == SymbolDef and pool.syms[t.symId] == typeSym:
           baseSym = objectBaseSym(n)
           return collectFields(n)
+      inc depth; inc n
+    of ParRi:
+      dec depth; inc n
+      if depth <= 0: break
+    of EofToken: break
+    else: inc n
+
+proc collectFieldItems(typeCursor: Cursor): seq[CompletionItem] =
+  ## Fields of a type subtree as completion items, annotated with `: <type>`.
+  result = @[]
+  var c = typeCursor
+  var depth = 0
+  while true:
+    case c.kind
+    of ParLe:
+      let tn = pool.tags[c.tagId]
+      if tn == "fld" or tn == "efld":
+        var d = c
+        inc d
+        if d.kind == SymbolDef:
+          let nm = demangle(pool.syms[d.symId])
+          if nm.len > 0 and not isSynthName(nm):
+            let ty = typeSlotName(c)
+            let sk = if tn == "efld": cikEnumMember else: cikField
+            result.add CompletionItem(label: nm, kind: sk,
+              detail: (if ty.len > 0: ": " & ty else: ""))
+      inc depth; inc c
+    of ParRi:
+      dec depth; inc c
+      if depth <= 0: break
+    of EofToken: break
+    else: inc c
+
+proc collectTypeFieldItemsBySym(buf: var TokenBuf; typeSym: string;
+                                baseSym: var string): seq[CompletionItem] =
+  ## Like `collectTypeFieldsBySym` but returns completion items with type detail.
+  result = @[]
+  baseSym = ""
+  var n = beginRead(buf)
+  var depth = 0
+  while true:
+    case n.kind
+    of ParLe:
+      if pool.tags[n.tagId] == "type":
+        var t = n
+        inc t
+        if t.kind == SymbolDef and pool.syms[t.symId] == typeSym:
+          baseSym = objectBaseSym(n)
+          return collectFieldItems(n)
       inc depth; inc n
     of ParRi:
       dec depth; inc n
@@ -721,10 +791,10 @@ proc dotMemberCompletions(cfg: Config; file: string; pos: Position;
           try: mbuf = loadBuf(f)
           except CatchableError: continue
           var baseSym = ""
-          for ds in collectTypeFieldsBySym(mbuf, cur, baseSym):
-            if ds.name.len > 0 and not isSynthName(ds.name) and ds.name notin seen:
-              seen.incl ds.name
-              items.add CompletionItem(label: ds.name, kind: toCompletionKind(ds.kind))
+          for it in collectTypeFieldItemsBySym(mbuf, cur, baseSym):
+            if it.label.len > 0 and it.label notin seen:
+              seen.incl it.label
+              items.add it
           if baseSym.len > 0 and baseSym notin chainSet and
              demangle(baseSym) != "RootObj":
             chainSet.incl baseSym
