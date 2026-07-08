@@ -16,7 +16,11 @@ and NIF-backed intelligence for Nimony code.
 - Rename (project-wide, with prepare-rename validation)
 - Document symbols (outline / breadcrumbs) and Workspace symbol search
 - Completion, including `.`-triggered member completion (fields + UFCS methods)
-- Semantic tokens (type-aware highlighting) and inlay type hints
+- Semantic tokens (type-aware highlighting, with declaration/readonly modifiers)
+- Inlay type hints, folding ranges, and expand-selection ranges
+- Call hierarchy (incoming / outgoing calls)
+- Go to type definition / implementation
+- Incremental document sync
 - Syntax highlighting for `.nim`, `.nims`, and `.nimony` files
 - Status bar item showing the server state (starting / running / stopped)
 - `Nimony: Restart Language Server` command

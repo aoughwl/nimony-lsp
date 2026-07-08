@@ -144,9 +144,51 @@ proc splitParams(inside: string): seq[ParameterInformation] =
     let p = inside[a ..< b].strip()
     if p.len > 0: result.add ParameterInformation(label: p)
 
+const RoutineKeywords = ["proc", "func", "method", "template", "macro",
+                         "converter", "iterator"]
+
+proc isRoutineHeaderFor(line, name: string): bool =
+  ## True when `line` declares a routine named exactly `name`.
+  var i = 0
+  while i < line.len and line[i] in {' ', '\t'}: inc i
+  var j = i
+  while j < line.len and line[j] in {'a'..'z'}: inc j
+  if line[i ..< j] notin RoutineKeywords: return false
+  var k = j
+  while k < line.len and line[k] in {' ', '\t'}: inc k
+  if k + name.len > line.len: return false
+  if line[k ..< k + name.len] != name: return false
+  let after = if k + name.len < line.len: line[k + name.len] else: ' '
+  result = after notin IdChars
+
+proc cutBody(sig: string): string =
+  ## Cut a one-line proc's body off its signature: truncate at the top-level
+  ## ` = ` separator (avoiding `==`/`<=`/`>=`/`!=` and default-value `=` inside
+  ## parens). Leaves multi-line decls (body on the next line) untouched.
+  var depth = 0
+  var i = 0
+  while i < sig.len:
+    let j = skipLiteralOrComment(sig, i)
+    if j != i:
+      i = j
+      continue
+    case sig[i]
+    of '(', '[', '{': inc depth
+    of ')', ']', '}':
+      if depth > 0: dec depth
+    of '=':
+      if depth == 0:
+        let prev = if i > 0: sig[i-1] else: ' '
+        let nxt = if i+1 < sig.len: sig[i+1] else: ' '
+        if prev in {' ', '\t'} and nxt in {' ', '\t'}:
+          return sig[0 ..< i].strip()
+    else: discard
+    inc i
+  result = sig
+
 proc parseSignatureLine(line: string): SignatureInformation =
-  ## Trim, drop a trailing `=`, and break out the parameter list.
-  var sig = line.strip()
+  ## Trim, drop the proc body, and break out the parameter list.
+  var sig = cutBody(line.strip())
   if sig.endsWith("="):
     sig = sig[0 ..< sig.len-1].strip()
   result = SignatureInformation(label: sig, parameters: @[])
@@ -193,6 +235,7 @@ proc signatureHelp*(cfg: Config; doc: Document; pos: Position): Option[Signature
     while s > 0 and text[s-1] in IdChars: dec s
     if s == e: return none(SignatureHelp)   # e.g. a grouping paren, not a call
     let calleePos = doc.positionAt(s)
+    let calleeName = text[s ..< e]
 
     let activeParam = countTopLevelCommas(text, openPos, cursor)
 
@@ -206,14 +249,32 @@ proc signatureHelp*(cfg: Config; doc: Document; pos: Position): Option[Signature
     let lines = readFile(defPath).splitLines
     if lineIdx < 0 or lineIdx >= lines.len: return none(SignatureHelp)
 
-    let si = parseSignatureLine(lines[lineIdx])
-    if si.label.len == 0: return none(SignatureHelp)
+    # Collect every overload of the callee declared in the definition file, and
+    # make the idetools-resolved one active.
+    var sigs: seq[SignatureInformation] = @[]
+    var seen: seq[string] = @[]
+    var activeSig = 0
+    for i, ln in lines:
+      if isRoutineHeaderFor(ln, calleeName):
+        let s2 = parseSignatureLine(ln)
+        if s2.label.len == 0 or s2.label in seen: continue
+        if i == lineIdx: activeSig = sigs.len
+        seen.add s2.label
+        sigs.add s2
+    # Fallback: if header scanning found nothing (e.g. def line isn't a routine
+    # header we recognize), use the single resolved line.
+    if sigs.len == 0:
+      let si = parseSignatureLine(lines[lineIdx])
+      if si.label.len == 0: return none(SignatureHelp)
+      sigs = @[si]
+      activeSig = 0
 
+    let activeSigParams = sigs[activeSig].parameters.len
     let active =
-      if si.parameters.len > 0: min(activeParam, si.parameters.len - 1)
+      if activeSigParams > 0: min(activeParam, activeSigParams - 1)
       else: 0
-    return some(SignatureHelp(signatures: @[si],
-                              activeSignature: 0,
+    return some(SignatureHelp(signatures: sigs,
+                              activeSignature: activeSig,
                               activeParameter: active))
   except CatchableError:
     return none(SignatureHelp)
