@@ -2,7 +2,7 @@
   "name": "nimony",
   "displayName": "Nimony",
   "description": "Language support for Nimony (the NIF-based Nim successor), powered by the nimony-lsp language server.",
-  "version": "0.7.0",
+  "version": "0.7.2",
   "publisher": "nimony",
   "license": "MIT",
   "engines": {
@@ -93,9 +93,10 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "vscode:prepublish": "npm run bundle",
+    "compile": "tsc -p ./ --noEmit",
+    "watch": "tsc -watch -p ./",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.0"
@@ -103,7 +104,8 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.75.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "esbuild": "^0.23.0"
   },
   "repository": {
     "type": "git",
