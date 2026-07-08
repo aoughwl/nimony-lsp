@@ -20,6 +20,7 @@ and NIF-backed intelligence for Nimony code.
 - Inlay type hints, folding ranges, and expand-selection ranges
 - Call hierarchy (incoming / outgoing calls)
 - Go to type definition / implementation
+- Document links (imports), code lens (reference counts), parameter-name hints
 - Incremental document sync
 - Syntax highlighting for `.nim`, `.nims`, and `.nimony` files
 - Status bar item showing the server state (starting / running / stopped)
