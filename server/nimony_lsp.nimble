@@ -1,4 +1,4 @@
-version       = "0.6.0"
+version       = "0.7.0"
 author        = "nimony-lsp"
 description    = "Language Server Protocol implementation for Nimony"
 license       = "MIT"
