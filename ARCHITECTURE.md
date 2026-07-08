@@ -170,6 +170,23 @@ alignment (codepoint==UTF-16) and centralize the conversion so we can harden lat
 - `driver/signature.nim` — returns every overload of the callee found in the
   definition file, with the idetools-resolved one marked `activeSignature`.
 
+## Optional warm-daemon backend (v0.4)
+
+- `driver/daemon.nim` — client for a persistent `nimsem serve` worker (JSONL
+  over stdio, protocol `v0`). Manages the subprocess (lazy spawn, restart-once
+  on death), correlates by `id`, and exposes `definition` / `references` /
+  `workspaceSymbols` returning `Option` (`none` ⇒ caller falls back to
+  idetools). Enabled only when `Config.daemonPath` is set (`NIMONY_DAEMON` env,
+  `daemonPath` init option, or `nimony.daemonPath` setting).
+- The dispatch tries the daemon first and uses its result only when non-empty,
+  otherwise the existing idetools / nifindex path runs — so navigation never
+  regresses and never hangs the default (the daemon is opt-in).
+- Daemon side (in the Nimony repo, `nimsem serve`): `defs` / `usages` /
+  `symbols` verbs reuse the refactored `idetools` machinery (now collecting
+  structured `IdeItem`s instead of writing stdout text), resolving the exact
+  overload against the warm whole-program graph. Coordinates match idetools:
+  request line/col 1-based, reply line 1-based / col 0-based → LSP `line-1`.
+
 ## Build
 
 Server: `cd server && nimble build` -> `server/bin/nimony-lsp`.

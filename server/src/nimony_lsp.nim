@@ -9,11 +9,11 @@ import lsp/[jsonrpc, protocol, uris]
 import server/[state, documents]
 import driver/[diagnostics, idetools, nifindex, nimonycli,
                signature, highlight, rename, workspacesym, semtokens, inlay,
-               folding, selection, callhierarchy, extranav]
+               folding, selection, callhierarchy, extranav, daemon]
 
 const
   ServerName = "nimony-lsp"
-  ServerVersion = "0.3.0"
+  ServerVersion = "0.4.0"
 
 var gState = newServerState()
 var gOut = stdout
@@ -52,6 +52,8 @@ proc handleInitialize(params: JsonNode): JsonNode =
     let ep = opts{"extraPaths"}
     if ep != nil and ep.kind == JArray:
       for x in ep: gState.config.extraPaths.add(x.getStr)
+    let dp = opts{"daemonPath"}.getStr("")
+    if dp.len > 0: gState.config.daemonPath = dp
   gState.initialized = true
   var tokenTypes = newJArray()
   for t in SemanticTokenTypes: tokenTypes.add(%t)
@@ -87,14 +89,23 @@ proc handleDefinition(params: JsonNode): JsonNode =
   let uri = textDocumentUri(params)
   let doc = gState.getDoc(uri)
   if doc == nil: return newJNull()
-  let locs = idetools.definition(gState.config, filePath(uri), positionParam(params))
+  let pos = positionParam(params)
+  # Warm-daemon path (exact overload resolution) first; idetools fallback.
+  var locs: seq[Location]
+  let d = daemon.definition(gState.config, filePath(uri), pos)
+  if d.isSome and d.get.len > 0: locs = d.get
+  else: locs = idetools.definition(gState.config, filePath(uri), pos)
   if locs.len == 0: newJNull() else: toJsonArray(locs)
 
 proc handleReferences(params: JsonNode): JsonNode =
   let uri = textDocumentUri(params)
   let doc = gState.getDoc(uri)
   if doc == nil: return newJArray()
-  let locs = idetools.references(gState.config, filePath(uri), positionParam(params))
+  let pos = positionParam(params)
+  var locs: seq[Location]
+  let d = daemon.references(gState.config, filePath(uri), pos)
+  if d.isSome and d.get.len > 0: locs = d.get
+  else: locs = idetools.references(gState.config, filePath(uri), pos)
   toJsonArray(locs)
 
 proc handleHover(params: JsonNode): JsonNode =
@@ -141,7 +152,10 @@ proc handleRename(params: JsonNode): JsonNode =
   if we.isSome: %we.get else: newJNull()
 
 proc handleWorkspaceSymbol(params: JsonNode): JsonNode =
-  toJsonArray(workspacesym.workspaceSymbols(gState.config, queryParam(params)))
+  let q = queryParam(params)
+  let d = daemon.workspaceSymbols(gState.config, q)
+  if d.isSome and d.get.len > 0: toJsonArray(d.get)
+  else: toJsonArray(workspacesym.workspaceSymbols(gState.config, q))
 
 proc handleInlayHint(params: JsonNode): JsonNode =
   let doc = gState.getDoc(textDocumentUri(params))
@@ -259,7 +273,9 @@ proc dispatchRequest(m: Message): JsonNode =
 proc dispatchNotification(m: Message) =
   case m.meth
   of "initialized": discard
-  of "exit": quit(if gState.shutdownRequested: 0 else: 1)
+  of "exit":
+    daemon.shutdown()
+    quit(if gState.shutdownRequested: 0 else: 1)
   of "textDocument/didOpen": handleDidOpen(m.params)
   of "textDocument/didChange": handleDidChange(m.params)
   of "textDocument/didSave": handleDidSave(m.params)

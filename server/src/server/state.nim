@@ -9,6 +9,7 @@ type
     nimonyExe*: string        ## path to the `nimony` binary
     extraPaths*: seq[string]  ## extra --path entries
     projectRoot*: string      ## workspace root (filesystem path)
+    daemonPath*: string       ## path to `nimsem serve` binary; "" = disabled
 
   ServerState* = ref object
     config*: Config
@@ -22,7 +23,13 @@ proc defaultConfig*(): Config =
   var exe = getEnv("NIMONY_EXE")
   if exe.len == 0:
     exe = "/home/savant/nimony/bin/nimony"
-  Config(nimonyExe: exe, extraPaths: @[], projectRoot: getCurrentDir())
+  # Opt-in warm-daemon backend for navigation (exact cross-module overload
+  # resolution, no per-query `nimony check`). OFF by default — the proven
+  # idetools path stays the default — and enabled only when `NIMONY_DAEMON`
+  # (or the `daemonPath` init option / client setting) points at a
+  # `nimsem serve` binary. Navigation falls back to idetools on any miss.
+  Config(nimonyExe: exe, extraPaths: @[], projectRoot: getCurrentDir(),
+         daemonPath: getEnv("NIMONY_DAEMON"))
 
 proc newServerState*(): ServerState =
   ServerState(config: defaultConfig(), docs: initTable[string, Document]())
