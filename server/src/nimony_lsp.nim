@@ -200,9 +200,14 @@ proc handlePrepareRename(params: JsonNode): JsonNode =
   if r.isSome: %r.get else: newJNull()
 
 proc handleRename(params: JsonNode): JsonNode =
-  let doc = gState.getDoc(textDocumentUri(params))
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
   if doc == nil: return newJNull()
-  let we = rename.rename(gState.config, doc, positionParam(params), renameNewName(params))
+  # Pass the other open documents so a rename updates cross-file usages too.
+  var roots: seq[string]
+  for docUri in gState.docs.keys:
+    if docUri != uri: roots.add(filePath(docUri))
+  let we = rename.rename(gState.config, doc, positionParam(params), renameNewName(params), roots)
   if we.isSome: %we.get else: newJNull()
 
 proc handleWorkspaceSymbol(params: JsonNode): JsonNode =

@@ -33,13 +33,16 @@ proc prepareRename*(cfg: Config; doc: Document; pos: Position): Option[PrepareRe
   except CatchableError:
     none(PrepareRenameResult)
 
-proc rename*(cfg: Config; doc: Document; pos: Position; newName: string): Option[WorkspaceEdit] =
+proc rename*(cfg: Config; doc: Document; pos: Position; newName: string;
+             extraRoots: seq[string] = @[]): Option[WorkspaceEdit] =
   try:
     let oldName = doc.wordAt(pos)
     if oldName.len == 0 or newName.len == 0: return none(WorkspaceEdit)
     let L = oldName.len
 
-    var locs = idetools.references(cfg, uriToPath(doc.uri), pos)
+    # `extraRoots` (the other open documents) let references reach usages in
+    # other modules — otherwise a cross-file rename would leave them dangling.
+    var locs = idetools.references(cfg, uriToPath(doc.uri), pos, extraRoots)
     locs.add(idetools.definition(cfg, uriToPath(doc.uri), pos))
     if locs.len == 0: return none(WorkspaceEdit)
 
