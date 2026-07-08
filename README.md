@@ -81,6 +81,13 @@ otherwise trigger into one, invalidated on any document change.
 
 ### Optional warm-daemon backend
 
+> **Status: experimental / frozen.** Araq's one-shot `nim track` direction
+> (goto-def/find-uses via the CLI, made fast by incremental compilation, with no
+> server process) is the blessed path for navigation — and it's exactly what the
+> **default** idetools backend already does. The warm daemon below is a marginal
+> latency optimization kept as an opt-in hedge; it is not developed further, and
+> navigation should be expected to ride the one-shot path.
+
 Definition, references, and workspace-symbol can be routed to a persistent
 `nimsem serve` worker instead of spawning `nimony check --def/--usages` per
 query. The daemon holds the whole-program interned symbol graph warm, so it
