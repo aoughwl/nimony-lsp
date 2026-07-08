@@ -9,7 +9,8 @@ import lsp/[jsonrpc, protocol, uris]
 import server/[state, documents]
 import driver/[diagnostics, idetools, nifindex, nimonycli,
                signature, highlight, rename, workspacesym, semtokens, inlay,
-               folding, selection, callhierarchy, extranav, daemon]
+               folding, selection, callhierarchy, extranav, daemon,
+               doclink, codelens, paramhints]
 
 const
   ServerName = "nimony-lsp"
@@ -77,9 +78,12 @@ proc handleInitialize(params: JsonNode): JsonNode =
       "callHierarchyProvider": true,
       "typeDefinitionProvider": true,
       "implementationProvider": true,
+      "documentLinkProvider": {"resolveProvider": false},
+      "codeLensProvider": {"resolveProvider": false},
       "semanticTokensProvider": {
         "legend": {"tokenTypes": tokenTypes, "tokenModifiers": tokenMods},
-        "full": true
+        "full": true,
+        "range": true
       }
     },
     "serverInfo": {"name": ServerName, "version": ServerVersion}
@@ -160,12 +164,25 @@ proc handleWorkspaceSymbol(params: JsonNode): JsonNode =
 proc handleInlayHint(params: JsonNode): JsonNode =
   let doc = gState.getDoc(textDocumentUri(params))
   if doc == nil: return newJArray()
-  toJsonArray(inlay.inlayHints(gState.config, doc, rangeParam(params)))
+  let rng = rangeParam(params)
+  var hints = inlay.inlayHints(gState.config, doc, rng)          # inferred types
+  hints.add paramhints.parameterHints(gState.config, doc, rng)   # parameter names
+  toJsonArray(hints)
 
 proc handleSemanticTokensFull(params: JsonNode): JsonNode =
   let doc = gState.getDoc(textDocumentUri(params))
   if doc == nil: return %*{"data": newJArray()}
   %semtokens.semanticTokensFull(gState.config, doc)
+
+proc handleDocumentLink(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  toJsonArray(doclink.documentLinks(gState.config, doc))
+
+proc handleCodeLens(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  toJsonArray(codelens.codeLenses(gState.config, doc))
 
 proc handleFoldingRange(params: JsonNode): JsonNode =
   let doc = gState.getDoc(textDocumentUri(params))
@@ -260,6 +277,9 @@ proc dispatchRequest(m: Message): JsonNode =
   of "textDocument/rename": response(m.id, handleRename(m.params))
   of "textDocument/inlayHint": response(m.id, handleInlayHint(m.params))
   of "textDocument/semanticTokens/full": response(m.id, handleSemanticTokensFull(m.params))
+  of "textDocument/semanticTokens/range": response(m.id, handleSemanticTokensFull(m.params))
+  of "textDocument/documentLink": response(m.id, handleDocumentLink(m.params))
+  of "textDocument/codeLens": response(m.id, handleCodeLens(m.params))
   of "workspace/symbol": response(m.id, handleWorkspaceSymbol(m.params))
   of "textDocument/foldingRange": response(m.id, handleFoldingRange(m.params))
   of "textDocument/selectionRange": response(m.id, handleSelectionRange(m.params))
