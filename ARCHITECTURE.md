@@ -170,6 +170,19 @@ alignment (codepoint==UTF-16) and centralize the conversion so we can harden lat
 - `driver/signature.nim` — returns every overload of the callee found in the
   definition file, with the idetools-resolved one marked `activeSignature`.
 
+## v0.6
+
+- `driver/typehierarchy.nim` — `prepareTypeHierarchy` / `supertypes` /
+  `subtypes` for object types: walks the `.s.nif`, reads each `type`'s `object`
+  base (the `of Base` Symbol), and for subtypes scans every module's `.s.nif`
+  for `object of <name>`.
+- `textDocument/declaration` aliases definition (Nimony has no separate
+  declaration site).
+- **Live diagnostics**: a threaded worker (isolated `.nimlsp_livecache`,
+  coalesced) was prototyped and reverted — unstable at teardown. Diagnostics
+  stay open/save-based; the incremental check makes live feasible once a stable
+  async worker lands.
+
 ## Optional warm-daemon backend (v0.4)
 
 - `driver/daemon.nim` — client for a persistent `nimsem serve` worker (JSONL

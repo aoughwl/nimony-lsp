@@ -75,6 +75,8 @@ binary through an LSP client harness and verified against `nimony` 0.4.0.
 | Document link | `import`/`from`/`include` → resolved module file | ✅ |
 | Code lens | "N references" above each top-level declaration | ✅ |
 | Inlay hints (parameters) | `paramName:` before positional call arguments (overload-aware) | ✅ |
+| Type hierarchy | super/subtypes of an object type (NIF inheritance walk) | ✅ |
+| Go to declaration | aliases definition | ✅ |
 | Syntax highlighting | TextMate grammar (`source.nimony`) | ✅ |
 
 Text document sync is **incremental** (`textDocumentSync: 2`); completion triggers
@@ -278,11 +280,15 @@ only apply the 0/1-based line/col shift.
 
 Current, honest edges — none block day-to-day use:
 
-- Diagnostics run on open/save (not per keystroke): `nimony` has no dirty-buffer
-  mechanism and `check` is whole-project, so live-as-you-type checking needs an
-  async worker (planned — see below). Navigation, hover, symbols, and semantic
-  tokens read the **saved** file; the exceptions are **member completion** and
-  the **document buffer** (incremental sync), which use the live text.
+- Diagnostics run on open/save (not per keystroke). This is **not** a compiler
+  limitation: Nimony's `check` is incrementally fast (~20ms per edit), and live
+  diagnostics on the *unsaved* buffer is proven to work (materialize the buffer
+  to a temp file, check, remap). What remains is doing it **off the stdio loop**
+  — a background worker with coalescing — so a ~1s cold check never blocks
+  typing. A first threaded worker proved unstable at teardown, so it is deferred
+  pending careful async work; it is the clear next step, not a blocker.
+  Navigation/hover/symbols/tokens read the **saved** file; member completion and
+  the document buffer (incremental sync) use the live text.
 - Call hierarchy and go-to-type-definition use source-scan / single-module NIF
   heuristics, so cross-module overloads and deeply generic types can be missed.
 - The generation cache coalesces redundant checks within a request but is not yet
