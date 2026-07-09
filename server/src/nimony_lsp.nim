@@ -479,13 +479,20 @@ proc drainReady(): seq[Message] =
     result.add mo.get
 
 proc serve(m: Message) =
-  if m.isNotification:
-    dispatchNotification(m)
-  elif m.isRequest:
-    if not gState.initialized and m.meth != "initialize":
-      writeMessage(gOut, errorResponse(m.id, ServerNotInitialized, "server not initialized"))
-    else:
-      writeMessage(gOut, dispatchRequest(m))
+  # A handler must NEVER take the server down. Any exception becomes an error
+  # response (so the client isn't left waiting) and the loop keeps serving.
+  try:
+    if m.isNotification:
+      dispatchNotification(m)
+    elif m.isRequest:
+      if not gState.initialized and m.meth != "initialize":
+        writeMessage(gOut, errorResponse(m.id, ServerNotInitialized, "server not initialized"))
+      else:
+        writeMessage(gOut, dispatchRequest(m))
+  except CatchableError as e:
+    if m.isRequest:
+      try: writeMessage(gOut, errorResponse(m.id, InternalError, "handler error: " & e.msg))
+      except CatchableError: discard
 
 var bgQueue: seq[Message]   ## background requests awaiting service, FIFO
 

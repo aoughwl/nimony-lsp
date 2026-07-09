@@ -47,7 +47,11 @@ proc readMessage*(inp: File): Option[Message] =
   try:
     node = parseJson(body)
   except CatchableError:
-    return none(Message)
+    # Body was fully consumed (exactly Content-Length bytes), so the stream is
+    # still framed — a bad JSON body is recoverable. Return an empty message the
+    # dispatcher safely ignores, rather than none() (which the loop treats as EOF
+    # and would exit on). Only a real EOF / framing loss ends the server.
+    return some(Message(raw: nil, meth: "", id: nil, params: nil))
   var m = Message(raw: node)
   m.id = node{"id"}
   m.params = node{"params"}
