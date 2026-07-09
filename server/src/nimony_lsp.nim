@@ -511,11 +511,30 @@ proc enqueueBackground(m: Message) =
   kept.add m
   bgQueue = kept
 
+const RequestCancelled = -32800   ## LSP: request cancelled by the client
+
+proc cancelPending(m: Message) =
+  ## Handle `$/cancelRequest`: drop a still-queued background request the client
+  ## abandoned (e.g. cursor moved on), answering it Cancelled so no pending
+  ## request leaks. Interactive requests are served immediately and never sit in
+  ## the queue, so a cancel for one simply finds nothing — a harmless no-op.
+  let id = if m.params != nil: m.params{"id"} else: nil
+  if id == nil or id.kind == JNull: return
+  var kept: seq[Message]
+  for q in bgQueue:
+    if q.id == id:
+      writeMessage(gOut, errorResponse(q.id, RequestCancelled, "cancelled"))
+    else:
+      kept.add q
+  bgQueue = kept
+
 proc intake(batch: seq[Message]) =
   ## Serve notifications (in order) and interactive requests immediately;
   ## enqueue background requests for later.
   for m in batch:
-    if m.isNotification: serve(m)
+    if m.isNotification:
+      if m.meth == "$/cancelRequest": cancelPending(m)
+      else: serve(m)
     elif m.isInteractive: serve(m)
     elif m.isRequest: enqueueBackground(m)
 
