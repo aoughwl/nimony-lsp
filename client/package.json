@@ -50,6 +50,10 @@
       {
         "command": "nimony.restartServer",
         "title": "Nimony: Restart Language Server"
+      },
+      {
+        "command": "nimony.run.file",
+        "title": "Nimony: Run File"
       }
     ],
     "configuration": {
@@ -90,7 +94,14 @@
           "description": "Traces the communication between VSCode and the Nimony language server."
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "key": "F6",
+        "command": "nimony.run.file",
+        "when": "editorLangId == 'nimony' || editorLangId == 'nim' || resourceExtname == '.nim'"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle",

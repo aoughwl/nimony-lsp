@@ -4,7 +4,8 @@
 ## response. Feature handlers live in `features/` and the `driver/` layer; this
 ## module owns lifecycle + document synchronization and routes requests.
 
-import std/[json, options, os, tables]
+import std/[json, options, os, tables, sets]
+from std/posix import poll, TPollfd, Tnfds, POLLIN
 import lsp/[jsonrpc, protocol, uris]
 import server/[state, documents]
 import driver/[diagnostics, idetools, nifindex, nimonycli,
@@ -18,6 +19,22 @@ const
 
 var gState = newServerState()
 var gOut = stdout
+
+proc c_setvbuf(f: File; buf: pointer; mode: cint; size: csize_t): cint {.
+  importc: "setvbuf", header: "<stdio.h>".}
+const IONBF = cint(2)   ## _IONBF: no stdio read-ahead, so poll() on fd 0 sees
+                        ## exactly what is pending — required for drainReady()
+                        ## to detect a burst instead of it hiding in the buffer.
+
+# --- as-you-type debounce ---------------------------------------------------
+# Live diagnostics run the nimony checker: cold ~1.1s, warm ~10-30ms. Doing that
+# synchronously on EVERY keystroke stalls hover/references behind a queue of
+# compiles (the "Loading…" everyone hit). Instead a document edit just marks the
+# doc dirty; the loop flushes ONE coalesced live-check only after input has been
+# idle for `DebounceMs`. So fast typing runs a single check when you pause, and
+# hover/definition/references are answered immediately, never waiting on a check.
+const DebounceMs = 200
+var pendingLive: HashSet[string]   ## uris with edits not yet checked
 
 proc publishDiagnostics(uri: string; diags: seq[Diagnostic]) =
   let params = %*{"uri": uri, "diagnostics": toJsonArray(diags)}
@@ -38,7 +55,11 @@ proc refreshDiagnostics(uri: string) =
     publishDiagnostics(uri, @[])
 
 proc liveTempPath(realPath: string): string =
-  realPath.parentDir / ("nimlsp_live_" & extractFilename(realPath))
+  # Hidden + ephemeral: a dotfile (never shows in the explorer) that is deleted
+  # right after each check (see refreshDiagnosticsLive), so it can't linger or
+  # flicker in the file tree. Kept a SIBLING of the real file (not /tmp) so the
+  # buffer's relative imports and project config still resolve during the check.
+  realPath.parentDir / (".nimlsp_live_" & extractFilename(realPath))
 
 proc cleanupLiveTemp(uri: string) =
   let path = filePath(uri)
@@ -60,6 +81,11 @@ proc refreshDiagnosticsLive(uri, text: string) =
     writeFile(tmp, text)
   except CatchableError:
     return
+  # The temp exists only for the duration of this check; drop it however we exit
+  # (isolated .nimlsp_livecache keeps the deps warm, so re-creating it is cheap).
+  defer:
+    try: removeFile(tmp)
+    except CatchableError: discard
   let root = if gState.config.projectRoot.len > 0: gState.config.projectRoot
              else: getCurrentDir()
   let livecache = root / ".nimlsp_livecache"
@@ -143,6 +169,13 @@ proc handleDefinition(params: JsonNode): JsonNode =
   let d = daemon.definition(gState.config, filePath(uri), pos)
   if d.isSome and d.get.len > 0: locs = d.get
   else: locs = idetools.definition(gState.config, filePath(uri), pos)
+  if locs.len == 0:
+    # No value symbol under the cursor — maybe it's a MODULE name in an import
+    # line (`import std/syncio`). Resolve it to the module's source file so F12
+    # on the module name opens it (stdlib source lives under <nimony>/lib).
+    let modPath = doclink.moduleRefAt(gState.config, doc, pos.line, pos.character)
+    if modPath.len > 0:
+      return toJsonArray(@[Location(uri: pathToUri(modPath), `range`: mkRange(0, 0, 0, 0))])
   if locs.len == 0: newJNull() else: toJsonArray(locs)
 
 proc handleReferences(params: JsonNode): JsonNode =
@@ -300,9 +333,9 @@ proc handleDidOpen(params: JsonNode) =
   let uri = td{"uri"}.getStr
   gState.openDoc(uri, td{"languageId"}.getStr("nim"),
                  td{"version"}.getInt(0), td{"text"}.getStr(""))
-  # Use the live path from the start: publishes diagnostics AND warms the
-  # isolated live-cache, so the first edit is fast (~25ms) rather than cold.
-  refreshDiagnosticsLive(uri, td{"text"}.getStr(""))
+  # Defer the first check to the next idle gap (it also warms the live-cache):
+  # opening a file no longer blocks the loop on a cold ~1.1s compile.
+  pendingLive.incl uri
 
 proc handleDidChange(params: JsonNode) =
   bumpCheckGeneration()
@@ -320,17 +353,19 @@ proc handleDidChange(params: JsonNode) =
         doc.applyChange(ver, getRange(rng), ch{"text"}.getStr(""))
       else:
         doc.update(ver, ch{"text"}.getStr(""))
-    refreshDiagnosticsLive(uri, doc.text)   # live as-you-type diagnostics
+    pendingLive.incl uri   # coalesced; flushed once input goes idle (see main)
 
 proc handleDidSave(params: JsonNode) =
   bumpCheckGeneration()
   let uri = textDocumentUri(params)
+  pendingLive.excl uri                      # the on-save real check supersedes
   cleanupLiveTemp(uri)                      # disk is current; drop the temp
   refreshDiagnostics(uri)
 
 proc handleDidClose(params: JsonNode) =
   bumpCheckGeneration()
   let uri = textDocumentUri(params)
+  pendingLive.excl uri
   cleanupLiveTemp(uri)
   gState.closeDoc(uri)
 
@@ -385,19 +420,131 @@ proc dispatchNotification(m: Message) =
   of "textDocument/didClose": handleDidClose(m.params)
   else: discard
 
-proc main() =
-  while true:
+proc flushPending() =
+  ## Run one coalesced check per dirty document, then clear the set.
+  if pendingLive.len == 0: return
+  let due = pendingLive     # snapshot; edits arriving during a check re-mark it
+  pendingLive.clear()
+  for uri in due:
+    let doc = gState.getDoc(uri)
+    if doc == nil: continue
+    let path = filePath(uri)
+    var onDisk = ""
+    var haveDisk = false
+    try:
+      onDisk = readFile(path); haveDisk = true
+    except CatchableError: discard
+    if haveDisk and onDisk == doc.text:
+      # Buffer == disk (just opened, or saved): check the REAL file into the main
+      # cache. This both publishes diagnostics AND warms the cache that hover /
+      # definition / references read — so the first navigation is fast, not a
+      # cold compile. (The isolated live-cache below wouldn't help those.)
+      refreshDiagnostics(uri)
+    else:
+      # Unsaved edits: isolated live-cache check on the temp buffer.
+      refreshDiagnosticsLive(uri, doc.text)
+
+proc stdinReadyWithin(ms: int): bool =
+  ## True if stdin has input ready within `ms`; false on idle timeout. Lets the
+  ## blocking loop wake up after a typing pause to flush pending diagnostics.
+  var fds: TPollfd
+  fds.fd = cint(0)                     # stdin
+  fds.events = POLLIN
+  fds.revents = 0
+  let r = poll(addr fds, Tnfds(1), cint(ms))
+  result = r > 0 and (fds.revents.int and POLLIN.int) != 0
+
+# Requests the user is actively waiting on. VS Code fires a BURST of feature
+# requests on every edit/cursor-move (semanticTokens, inlayHint, codeLens,
+# folding, documentSymbol, documentHighlight …), each costing a compile. Served
+# strictly in arrival order, an interactive hover queues behind all of them
+# (~9s → "Loading forever"). We drain the burst and serve these FIRST; LSP lets
+# responses return out of order (the client matches by request id).
+const InteractiveMethods = [
+  "textDocument/hover", "textDocument/completion", "textDocument/signatureHelp",
+  "textDocument/definition", "textDocument/declaration",
+  "textDocument/typeDefinition", "textDocument/implementation",
+  "textDocument/references", "shutdown"]
+
+proc isInteractive(m: Message): bool =
+  m.isRequest and m.meth in InteractiveMethods
+
+proc drainReady(): seq[Message] =
+  ## Every message already waiting on stdin, without blocking. Excess (buffered
+  ## in stdio, invisible to poll) is simply picked up on the next loop turn.
+  result = @[]
+  while stdinReadyWithin(0):
     let mo = readMessage(stdin)
-    if mo.isNone: break        # EOF
-    let m = mo.get
-    if m.isNotification:
-      dispatchNotification(m)
-    elif m.isRequest:
-      if not gState.initialized and m.meth != "initialize":
-        writeMessage(gOut, errorResponse(m.id, ServerNotInitialized, "server not initialized"))
-        continue
+    if mo.isNone: break
+    result.add mo.get
+
+proc serve(m: Message) =
+  if m.isNotification:
+    dispatchNotification(m)
+  elif m.isRequest:
+    if not gState.initialized and m.meth != "initialize":
+      writeMessage(gOut, errorResponse(m.id, ServerNotInitialized, "server not initialized"))
+    else:
       writeMessage(gOut, dispatchRequest(m))
-    # responses from client (to our requests) are ignored for now
+
+var bgQueue: seq[Message]   ## background requests awaiting service, FIFO
+
+const ContentModified = -32801   ## LSP: "result is stale, discard" (silenced by clients)
+
+proc bgKey(m: Message): string =
+  let u = if m.params != nil: textDocumentUri(m.params) else: ""
+  m.meth & "\x1f" & u
+
+proc enqueueBackground(m: Message) =
+  ## Queue a background request, superseding any earlier queued one of the SAME
+  ## kind for the SAME document — while you keep typing, VS Code re-fires
+  ## semanticTokens/inlay/codeLens every keystroke; without this the queue floods
+  ## and takes a minute to drain. The superseded request is answered
+  ## ContentModified (stale), so the client never leaks a pending request.
+  let k = bgKey(m)
+  var kept: seq[Message]
+  for q in bgQueue:
+    if bgKey(q) == k:
+      writeMessage(gOut, errorResponse(q.id, ContentModified, "superseded"))
+    else:
+      kept.add q
+  kept.add m
+  bgQueue = kept
+
+proc intake(batch: seq[Message]) =
+  ## Serve notifications (in order) and interactive requests immediately;
+  ## enqueue background requests for later.
+  for m in batch:
+    if m.isNotification: serve(m)
+    elif m.isInteractive: serve(m)
+    elif m.isRequest: enqueueBackground(m)
+
+proc main() =
+  discard c_setvbuf(stdin, nil, IONBF, 0)   # unbuffered: see note on IONBF
+  while true:
+    # Idle housekeeping: with edits pending and no background work queued, wait
+    # briefly; if input stays idle, flush ONE coalesced live-check (diagnostics).
+    if bgQueue.len == 0 and pendingLive.len > 0 and not stdinReadyWithin(DebounceMs):
+      flushPending()
+      continue
+
+    # Fetch work. Block for it ONLY when there's no background item to grind —
+    # otherwise just drain what's ready (non-blocking) so background work keeps
+    # moving while we stay responsive to new input.
+    if bgQueue.len == 0:
+      let mo = readMessage(stdin)
+      if mo.isNone: break                    # EOF
+      intake(@[mo.get] & drainReady())
+    else:
+      intake(drainReady())
+
+    # Serve ONE background request, then loop back — so a hover/completion that
+    # arrives mid-burst is drained and served BEFORE the next background item,
+    # never stuck behind the whole semantic-tokens/inlay/codeLens tail.
+    if bgQueue.len > 0:
+      let m = bgQueue[0]
+      bgQueue.delete(0)
+      serve(m)
 
 when isMainModule:
   main()

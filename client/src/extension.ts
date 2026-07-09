@@ -196,6 +196,30 @@ export async function activate(
     })
   );
 
+  // Run the current file: `nimony c -r <file>` in a reused terminal (F6).
+  context.subscriptions.push(
+    vscode.commands.registerCommand("nimony.run.file", async () => {
+      const ed = vscode.window.activeTextEditor;
+      if (!ed) {
+        vscode.window.showWarningMessage("Nimony: no active file to run.");
+        return;
+      }
+      await ed.document.save();
+      const file = ed.document.uri.fsPath;
+      const cfg = getConfig();
+      const nimony = cfg.get<string>("nimonyPath", "/home/savant/nimony/bin/nimony");
+      const extra = cfg.get<string[]>("extraPaths", []);
+      const q = (s: string) => (/[\s"']/.test(s) ? `'${s.replace(/'/g, "'\\''")}'` : s);
+      const paths = extra.map((p) => `-p:${q(p)}`).join(" ");
+      const dir = path.dirname(file);
+      const term =
+        vscode.window.terminals.find((t) => t.name === "Nimony Run") ??
+        vscode.window.createTerminal({ name: "Nimony Run", cwd: dir });
+      term.show(true);
+      term.sendText(`${q(nimony)} c -r ${paths} ${q(file)}`.replace(/\s+/g, " ").trim());
+    })
+  );
+
   // Restart automatically when relevant settings change so the new
   // serverPath / nimonyPath / extraPaths take effect.
   context.subscriptions.push(

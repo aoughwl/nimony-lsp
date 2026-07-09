@@ -15,6 +15,30 @@ type
     output*: string    ## merged stdout+stderr
     exitCode*: int
 
+const
+  CheckTimeoutMs = 20_000   ## hard cap on any nimony subprocess. Normal checks
+                            ## are ~1s; this only ever fires on a genuine hang,
+                            ## turning "Loading forever" into a bounded failure.
+
+proc waitBounded(p: Process; timeoutMs: int): int =
+  ## Exit code, or -1 if the process overran `timeoutMs` (then it is killed).
+  ## A live process reports peekExitCode == -1, so -1 is a safe "timed out"
+  ## sentinel (a real exit code is always >= 0).
+  var waited = 0
+  const step = 15
+  while true:
+    let c = p.peekExitCode()
+    if c != -1: return c
+    if waited >= timeoutMs:
+      try: p.terminate() except CatchableError: discard
+      try:
+        if p.peekExitCode() == -1: p.kill()
+      except CatchableError: discard
+      try: discard p.waitForExit() except CatchableError: discard
+      return -1
+    sleep(step)
+    waited += step
+
 var
   checkGeneration = 0
   checkCache = initTable[string, CheckResult]()
@@ -47,11 +71,10 @@ proc runUncached(cfg: Config; sub: string; file: string; track: seq[string]): Ch
                      options = {poStdErrToStdOut})
   except OSError:
     return CheckResult(output: "", exitCode: 127)
-  let outp = p.outputStream
-  var buf = ""
-  buf = outp.readAll()
-  let code = p.waitForExit()
+  let code = waitBounded(p, CheckTimeoutMs)
+  let buf = try: p.outputStream.readAll() except CatchableError: ""
   p.close()
+  if code < 0: return CheckResult(output: "", exitCode: 124)   # hung → killed
   CheckResult(output: buf, exitCode: code)
 
 proc run*(cfg: Config; sub: string; file: string; track: seq[string] = @[]): CheckResult =
@@ -87,7 +110,8 @@ proc runLiveCheck*(cfg: Config; file, nimcache: string): CheckResult =
                      options = {poStdErrToStdOut})
   except OSError:
     return CheckResult(output: "", exitCode: 127)
-  let buf = p.outputStream.readAll()
-  let code = p.waitForExit()
+  let code = waitBounded(p, CheckTimeoutMs)
+  let buf = try: p.outputStream.readAll() except CatchableError: ""
   p.close()
+  if code < 0: return CheckResult(output: "", exitCode: 124)   # hung → killed
   CheckResult(output: buf, exitCode: code)
