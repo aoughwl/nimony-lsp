@@ -312,15 +312,20 @@ proc hoverSingleLine(lines: seq[string]; lineIdx: int): Option[Hover] =
   return some(Hover(contents: MarkupContent(kind: "markdown", value: md),
                     `range`: none(Range)))
 
-proc hoverAt*(cfg: Config; file: string; pos: Position): Option[Hover] =
+proc hoverAt*(cfg: Config; file: string; pos: Position;
+              live: idetools.LiveCtx = idetools.LiveCtx(); bufText = ""): Option[Hover] =
   try:
-    let locs = idetools.definition(cfg, file, pos)
+    let locs = idetools.definition(cfg, file, pos, live)
     if locs.len == 0: return none(Hover)
     let loc = locs[0]
     let defPath = uriToPath(loc.uri)
-    if not fileExists(defPath): return none(Hover)
     let lineIdx = loc.`range`.start.line     # 0-based
-    let content = readFile(defPath)
+    var content: string
+    if live.active and bufText.len > 0 and normalizedPath(defPath) == live.realAbs:
+      content = bufText            # def is in the edited file: buffer lines match the range
+    else:
+      if not fileExists(defPath): return none(Hover)
+      content = readFile(defPath)  # imported module / clean file: disk is correct
     let lines = content.splitLines
     if lineIdx < 0 or lineIdx >= lines.len: return none(Hover)
     # Enriched path: multi-line signature + doc comment. Any failure falls

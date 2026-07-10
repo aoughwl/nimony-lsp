@@ -24,6 +24,12 @@
     "onLanguage:nim"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "files.exclude": {
+        "**/nimlsp_live_*": true,
+        "**/.nimlsp_livecache": true
+      }
+    },
     "languages": [
       {
         "id": "nimony",

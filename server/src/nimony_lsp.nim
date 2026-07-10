@@ -57,11 +57,13 @@ proc refreshDiagnostics(uri: string) =
     publishDiagnostics(uri, @[])
 
 proc liveTempPath(realPath: string): string =
-  # Hidden + ephemeral: a dotfile (never shows in the explorer) that is deleted
-  # right after each check (see refreshDiagnosticsLive), so it can't linger or
-  # flicker in the file tree. Kept a SIBLING of the real file (not /tmp) so the
+  # Ephemeral sibling of the real file (deleted right after each check), so the
   # buffer's relative imports and project config still resolve during the check.
-  realPath.parentDir / (".nimlsp_live_" & extractFilename(realPath))
+  # NOTE: the name must NOT start with a dot — nimony derives a module id from the
+  # filename and a leading-dot name yields an empty id, crashing the checker
+  # (`nifreader: r.thisModule.len > 0`). It is hidden from the explorer via the
+  # extension's `files.exclude` contribution (`**/nimlsp_live_*`) instead.
+  realPath.parentDir / ("nimlsp_live_" & extractFilename(realPath))
 
 proc cleanupLiveTemp(uri: string) =
   let path = filePath(uri)
@@ -70,6 +72,35 @@ proc cleanupLiveTemp(uri: string) =
     let tmp = liveTempPath(path)
     if fileExists(tmp): removeFile(tmp)
   except CatchableError: discard
+
+proc buildLiveCtx(uri: string; doc: Document): (idetools.LiveCtx, bool) =
+  ## (ctx, wroteTemp). ctx.active only when the buffer differs from disk — so
+  ## hover/definition/references reflect UNSAVED edits (they otherwise read the
+  ## last-saved file). Caller MUST cleanupLiveTemp(uri) when wroteTemp. Mirrors
+  ## refreshDiagnosticsLive's temp materialization (sibling dotfile, relative
+  ## path, isolated .nimlsp_livecache), so nav and live diagnostics share warmth.
+  result = (idetools.LiveCtx(), false)
+  let path = filePath(uri)
+  if path.len == 0: return
+  var onDisk = ""
+  var haveDisk = false
+  try:
+    onDisk = readFile(path); haveDisk = true
+  except CatchableError: discard
+  if haveDisk and onDisk == doc.text: return        # clean → disk path (warm cache)
+  let tmp = liveTempPath(path)
+  try: writeFile(tmp, doc.text)
+  except CatchableError: return                      # write failed → fall back to disk
+  let root = if gState.config.projectRoot.len > 0: gState.config.projectRoot
+             else: getCurrentDir()
+  let relTmp = if tmp.isAbsolute and gState.config.projectRoot.len > 0:
+                 relativePath(tmp, gState.config.projectRoot)
+               else: tmp
+  result = (idetools.LiveCtx(active: true,
+                             realAbs: normalizedPath(path),
+                             tempAbs: normalizedPath(tmp),
+                             tempRel: relTmp,
+                             nimcache: root / ".nimlsp_livecache"), true)
 
 proc refreshDiagnosticsLive(uri, text: string) =
   ## As-you-type diagnostics on the UNSAVED buffer: materialize it to a stable
@@ -166,43 +197,72 @@ proc handleDefinition(params: JsonNode): JsonNode =
   let doc = gState.getDoc(uri)
   if doc == nil: return newJNull()
   let pos = positionParam(params)
-  # Warm-daemon path (exact overload resolution) first; idetools fallback.
-  var locs: seq[Location]
-  let d = daemon.definition(gState.config, filePath(uri), pos)
-  if d.isSome and d.get.len > 0: locs = d.get
-  else: locs = idetools.definition(gState.config, filePath(uri), pos)
-  if locs.len == 0:
-    # No value symbol under the cursor — maybe it's a MODULE name in an import
-    # line (`import std/syncio`). Resolve it to the module's source file so F12
-    # on the module name opens it (stdlib source lives under <nimony>/lib).
-    let modPath = doclink.moduleRefAt(gState.config, doc, pos.line, pos.character)
-    if modPath.len > 0:
-      return toJsonArray(@[Location(uri: pathToUri(modPath), `range`: mkRange(0, 0, 0, 0))])
-  if locs.len == 0: newJNull() else: toJsonArray(locs)
+  let (live, wrote) = buildLiveCtx(uri, doc)
+  try:
+    var locs: seq[Location]
+    if live.active:
+      # Dirty buffer: the warm daemon compiled the last-saved file and can't see
+      # unsaved edits, so go straight to the live temp. If the buffer is mid-edit
+      # (unparseable) and yields nothing, fall back to the last-good answer.
+      locs = idetools.definition(gState.config, filePath(uri), pos, live)
+      if locs.len == 0:
+        let d = daemon.definition(gState.config, filePath(uri), pos)
+        if d.isSome and d.get.len > 0: locs = d.get
+        else: locs = idetools.definition(gState.config, filePath(uri), pos)
+    else:
+      # Warm-daemon path (exact overload resolution) first; idetools fallback.
+      let d = daemon.definition(gState.config, filePath(uri), pos)
+      if d.isSome and d.get.len > 0: locs = d.get
+      else: locs = idetools.definition(gState.config, filePath(uri), pos)
+    if locs.len == 0:
+      # No value symbol under the cursor — maybe it's a MODULE name in an import
+      # line (`import std/syncio`). Resolve it to the module's source file so F12
+      # on the module name opens it (stdlib source lives under <nimony>/lib).
+      let modPath = doclink.moduleRefAt(gState.config, doc, pos.line, pos.character)
+      if modPath.len > 0:
+        return toJsonArray(@[Location(uri: pathToUri(modPath), `range`: mkRange(0, 0, 0, 0))])
+    result = if locs.len == 0: newJNull() else: toJsonArray(locs)
+  finally:
+    if wrote: cleanupLiveTemp(uri)
 
 proc handleReferences(params: JsonNode): JsonNode =
   let uri = textDocumentUri(params)
   let doc = gState.getDoc(uri)
   if doc == nil: return newJArray()
   let pos = positionParam(params)
-  var locs: seq[Location]
-  let d = daemon.references(gState.config, filePath(uri), pos)
-  if d.isSome and d.get.len > 0: locs = d.get
-  else:
-    # Pass every open document as an extra compilation root so usages in other
-    # modules (which idetools only sees when their unit is compiled) are found.
-    var roots: seq[string]
-    for docUri in gState.docs.keys:
-      if docUri != uri: roots.add(filePath(docUri))
-    locs = idetools.references(gState.config, filePath(uri), pos, roots)
-  toJsonArray(locs)
+  # Pass every open document as an extra compilation root so usages in other
+  # modules (which idetools only sees when their unit is compiled) are found.
+  var roots: seq[string]
+  for docUri in gState.docs.keys:
+    if docUri != uri: roots.add(filePath(docUri))
+  let (live, wrote) = buildLiveCtx(uri, doc)
+  try:
+    var locs: seq[Location]
+    if live.active:
+      locs = idetools.references(gState.config, filePath(uri), pos, roots, live)
+      if locs.len == 0:                                   # mid-edit fallback
+        locs = idetools.references(gState.config, filePath(uri), pos, roots)
+    else:
+      let d = daemon.references(gState.config, filePath(uri), pos)
+      if d.isSome and d.get.len > 0: locs = d.get
+      else: locs = idetools.references(gState.config, filePath(uri), pos, roots)
+    result = toJsonArray(locs)
+  finally:
+    if wrote: cleanupLiveTemp(uri)
 
 proc handleHover(params: JsonNode): JsonNode =
   let uri = textDocumentUri(params)
   let doc = gState.getDoc(uri)
   if doc == nil: return newJNull()
-  let h = nifindex.hoverAt(gState.config, filePath(uri), positionParam(params))
-  if h.isSome: %h.get else: newJNull()
+  let (live, wrote) = buildLiveCtx(uri, doc)
+  try:
+    var h = nifindex.hoverAt(gState.config, filePath(uri),
+                             positionParam(params), live, doc.text)
+    if h.isNone and live.active:                          # mid-edit fallback
+      h = nifindex.hoverAt(gState.config, filePath(uri), positionParam(params))
+    result = if h.isSome: %h.get else: newJNull()
+  finally:
+    if wrote: cleanupLiveTemp(uri)
 
 proc handleDocumentSymbol(params: JsonNode): JsonNode =
   let uri = textDocumentUri(params)
