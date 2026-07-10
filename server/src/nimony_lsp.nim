@@ -35,6 +35,8 @@ const IONBF = cint(2)   ## _IONBF: no stdio read-ahead, so poll() on fd 0 sees
 # hover/definition/references are answered immediately, never waiting on a check.
 const DebounceMs = 200
 var pendingLive: HashSet[string]   ## uris with edits not yet checked
+var pendingWarm: HashSet[string]   ## freshly opened uris whose MAIN nimcache
+                                   ## must be warmed before nav is fast
 
 proc publishDiagnostics(uri: string; diags: seq[Diagnostic]) =
   let params = %*{"uri": uri, "diagnostics": toJsonArray(diags)}
@@ -333,9 +335,13 @@ proc handleDidOpen(params: JsonNode) =
   let uri = td{"uri"}.getStr
   gState.openDoc(uri, td{"languageId"}.getStr("nim"),
                  td{"version"}.getInt(0), td{"text"}.getStr(""))
-  # Defer the first check to the next idle gap (it also warms the live-cache):
-  # opening a file no longer blocks the loop on a cold ~1.1s compile.
-  pendingLive.incl uri
+  # Warm the MAIN nimcache for this doc right away (highest priority in the loop).
+  # hover / definition / references all read that cache; if it is cold, EACH pays
+  # a ~1.5s compile and — with VS Code's feature burst and multiple servers all
+  # thrashing one cold nimcache — the whole IDE "hangs on everything for ages"
+  # until something finally compiles the project. Warming eagerly means the burst
+  # that follows didOpen hits a WARM cache and resolves instantly.
+  pendingWarm.incl uri
 
 proc handleDidChange(params: JsonNode) =
   bumpCheckGeneration()
@@ -545,9 +551,29 @@ proc intake(batch: seq[Message]) =
     elif m.isInteractive: serve(m)
     elif m.isRequest: enqueueBackground(m)
 
+proc popAny(s: var HashSet[string]): string =
+  ## Remove and return one arbitrary element (set has no ordering).
+  result = ""
+  for x in s:
+    result = x
+    break
+  if result.len > 0: s.excl result
+
 proc main() =
   discard c_setvbuf(stdin, nil, IONBF, 0)   # unbuffered: see note on IONBF
   while true:
+    # HIGHEST PRIORITY: warm the MAIN nimcache for a freshly opened doc before
+    # anything else. Ungated by idle/queue state on purpose — under a feature
+    # burst the idle flush below can be starved indefinitely, and until the cache
+    # is warm every hover/definition sits on a cold compile. One cold compile per
+    # open; every check afterward hits the warm cache and is ~instant.
+    if pendingWarm.len > 0:
+      let uri = popAny(pendingWarm)
+      if uri.len > 0 and gState.getDoc(uri) != nil:
+        pendingLive.excl uri            # this warm publishes fresh diagnostics too
+        refreshDiagnostics(uri)
+      continue
+
     # Idle housekeeping: with edits pending and no background work queued, wait
     # briefly; if input stays idle, flush ONE coalesced live-check (diagnostics).
     if bgQueue.len == 0 and pendingLive.len > 0 and not stdinReadyWithin(DebounceMs):

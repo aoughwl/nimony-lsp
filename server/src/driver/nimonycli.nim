@@ -48,6 +48,21 @@ proc bumpCheckGeneration*() =
   inc checkGeneration
   checkCache.clear()
 
+proc canonFile*(cfg: Config; file: string): string =
+  ## Canonical path form handed to nimony: RELATIVE to projectRoot when the file
+  ## lives under it. nimony keys its incremental compile cache by the path string
+  ## AS GIVEN, so an absolute-path warm (diagnostics) and a relative-path query
+  ## (--def / --usages for hover, definition, references) would otherwise land on
+  ## SEPARATE cache entries — navigation would recompile the whole project on
+  ## every request, forever, no matter how many times diagnostics warmed. Funnel
+  ## every invocation through the SAME form so they all share one warm entry.
+  if cfg.projectRoot.len > 0 and file.isAbsolute:
+    let rel = relativePath(file, cfg.projectRoot, '/')
+    if rel.len == 0 or rel.startsWith(".."): file   # outside the root: keep abs
+    else: rel
+  else:
+    file
+
 proc cacheKey(sub, file: string; track: seq[string]): string =
   $checkGeneration & "\x1f" & sub & "\x1f" & file & "\x1f" & track.join("\x1f")
 
@@ -79,11 +94,13 @@ proc runUncached(cfg: Config; sub: string; file: string; track: seq[string]): Ch
 
 proc run*(cfg: Config; sub: string; file: string; track: seq[string] = @[]): CheckResult =
   ## Run `nimony <sub> [--path ...] [track...] <file>` from the project root,
-  ## memoized for the current generation.
-  let key = cacheKey(sub, file, track)
+  ## memoized for the current generation. The file path is canonicalized so every
+  ## caller (diagnostics, hover, definition, references) shares one warm cache.
+  let cf = canonFile(cfg, file)
+  let key = cacheKey(sub, cf, track)
   checkCache.withValue(key, cached):
     return cached[]
-  result = runUncached(cfg, sub, file, track)
+  result = runUncached(cfg, sub, cf, track)
   # Only cache a real compiler run (not the "binary missing" sentinel), so a
   # transient misconfiguration doesn't poison the whole generation.
   if result.exitCode != 127:
