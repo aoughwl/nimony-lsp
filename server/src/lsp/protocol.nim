@@ -115,7 +115,16 @@ type
 
   # ---- semantic tokens ----
   SemanticTokens* = object
+    resultId*: string           ## monotonic id (plain counter), "" if unset
     data*: seq[int]             ## 5-int LSP delta encoding, flattened
+
+  SemanticTokensEdit* = object
+    start*, deleteCount*: int
+    data*: seq[int]
+
+  SemanticTokensDelta* = object
+    resultId*: string
+    edits*: seq[SemanticTokensEdit]
 
   # ---- inlay hints ----
   InlayHintKind* = enum
@@ -127,6 +136,9 @@ type
     kind*: InlayHintKind
     paddingLeft*: bool
     paddingRight*: bool
+    tooltip*: string           ## resolved: bare type text; omitted from JSON if ""
+    textEdits*: seq[TextEdit]  ## resolved: edit(s) that materialize the annotation
+    data*: JsonNode            ## opaque round-trip payload (e.g. {"uri": ...}); nil if unset
 
   # ---- folding ----
   FoldingRange* = object
@@ -178,6 +190,20 @@ type
     uri*: string
     `range`*: Range
     selectionRange*: Range
+
+  # ---- code action ----
+  CodeAction* = object
+    title*: string
+    kind*: string
+    diagnostics*: seq[Diagnostic]
+    edit*: WorkspaceEdit
+    isPreferred*: bool
+    data*: JsonNode
+
+  # ---- linked editing ----
+  LinkedEditingRanges* = object
+    ranges*: seq[Range]
+    wordPattern*: string
 
 const
   ## Fixed legend shared by the semanticTokens capability and semtokens.nim.
@@ -289,12 +315,29 @@ proc `%`*(s: SymbolInformation): JsonNode =
 proc `%`*(t: SemanticTokens): JsonNode =
   var arr = newJArray()
   for x in t.data: arr.add(%x)
-  %*{"data": arr}
+  result = %*{"data": arr}
+  if t.resultId.len > 0: result["resultId"] = %t.resultId
+
+proc `%`*(e: SemanticTokensEdit): JsonNode =
+  var arr = newJArray()
+  for x in e.data: arr.add(%x)
+  %*{"start": e.start, "deleteCount": e.deleteCount, "data": arr}
+
+proc `%`*(d: SemanticTokensDelta): JsonNode =
+  var arr = newJArray()
+  for e in d.edits: arr.add(%e)
+  %*{"resultId": d.resultId, "edits": arr}
 
 proc `%`*(h: InlayHint): JsonNode =
   result = %*{"position": %h.position, "label": h.label, "kind": ord(h.kind)}
   if h.paddingLeft: result["paddingLeft"] = %true
   if h.paddingRight: result["paddingRight"] = %true
+  if h.tooltip.len > 0: result["tooltip"] = %h.tooltip
+  if h.textEdits.len > 0:
+    var arr = newJArray()
+    for e in h.textEdits: arr.add(%e)
+    result["textEdits"] = arr
+  if h.data != nil: result["data"] = h.data
 
 proc `%`*(f: FoldingRange): JsonNode =
   result = %*{"startLine": f.startLine, "endLine": f.endLine}
@@ -335,6 +378,24 @@ proc `%`*(it: TypeHierarchyItem): JsonNode =
   result = %*{"name": it.name, "kind": ord(it.kind), "uri": it.uri,
               "range": %it.`range`, "selectionRange": %it.selectionRange}
   if it.detail.len > 0: result["detail"] = %it.detail
+
+proc `%`*(a: CodeAction): JsonNode =
+  result = %*{"title": a.title}
+  if a.kind.len > 0: result["kind"] = %a.kind
+  if a.diagnostics.len > 0:
+    var arr = newJArray()
+    for d in a.diagnostics: arr.add(%d)
+    result["diagnostics"] = arr
+  if a.edit.changes.len > 0: result["edit"] = %a.edit
+  if a.isPreferred: result["isPreferred"] = %true
+  if a.data != nil: result["data"] = a.data
+
+proc `%`*(l: LinkedEditingRanges): JsonNode =
+  result = newJObject()
+  var arr = newJArray()
+  for r in l.ranges: arr.add(%r)
+  result["ranges"] = arr
+  if l.wordPattern.len > 0: result["wordPattern"] = %l.wordPattern
 
 proc toJsonArray*[T](xs: seq[T]): JsonNode =
   result = newJArray()

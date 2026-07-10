@@ -1,50 +1,46 @@
 ## textDocument/codeLens: emit a "N references" lens above each top-level
 ## declaration.
 ##
-## We reuse nifindex.documentSymbols to enumerate top-level decls (with their
-## ranges) and idetools.references to count uses of each. Reference counts are
-## approximate: idetools is young and may miss some usages, which is acceptable.
+## Counts come from `navindex.referenceCounts`, which does ONE in-process
+## `.s.nif` walk (via the shared nifcache) and yields, for every top-level
+## decl, its selectionRange + use-count — with zero per-symbol nimony spawns.
+## (The old implementation ran `idetools.references` once per symbol: 2N cold
+## compiler invocations per file. That is gone.)
 ##
-## Every path is defensively wrapped so a failure yields `@[]` and never takes
-## the LSP process down.
+## Reference counts are approximate: the index is young and may miss some
+## usages, which is acceptable for a lens.
+##
+## Every path is defensively wrapped so a failure yields `@[]` (or the lens
+## unchanged) and never takes the LSP process down.
 
-import std/[sets]
 import ../lsp/protocol
 import ../lsp/uris
 import ../server/state
 import ../server/documents
-import ./nifindex
-import ./idetools
+import ./navindex
 
-const MaxSymbols = 200
-  ## Cap: skip running idetools hundreds of times on a huge file.
-
-proc referenceCount(cfg: Config; file: string; sym: DocumentSymbol): int =
-  ## Number of distinct use-sites for `sym`, deduped by uri+line+char. The
-  ## declaration site itself is excluded from the count.
-  let locs = idetools.references(cfg, file, sym.selectionRange.start)
-  var seen = initHashSet[string]()
-  let declKey = pathToUri(file) & "#" &
-    $sym.selectionRange.start.line & ":" & $sym.selectionRange.start.character
-  for loc in locs:
-    let key = loc.uri & "#" &
-      $loc.`range`.start.line & ":" & $loc.`range`.start.character
-    if key == declKey: continue          # exclude the declaration itself
-    if not seen.containsOrIncl(key):
-      inc result
+proc lensTitle(count: int): string =
+  if count == 1: "1 reference" else: $count & " references"
 
 proc codeLenses*(cfg: Config; doc: Document): seq[CodeLens] =
+  ## One index walk: a "N references" lens on every top-level declaration.
   result = @[]
   try:
     let file = uriToPath(doc.uri)
-    let syms = nifindex.documentSymbols(cfg, file)
-    if syms.len > MaxSymbols:
-      return result           # too much work; bail rather than stall the LSP
-    for sym in syms:
-      if sym.name.len == 0: continue
-      let count = referenceCount(cfg, file, sym)
-      let title = if count == 1: "1 reference" else: $count & " references"
-      result.add CodeLens(`range`: sym.selectionRange,
-                          command: Command(title: title, command: ""))
+    for entry in navindex.referenceCounts(cfg, file):
+      result.add CodeLens(`range`: entry.rng,
+                          command: Command(title: lensTitle(entry.count),
+                                           command: ""))
   except CatchableError:
-    return @[]
+    result = @[]
+
+proc resolveCodeLens*(cfg: Config; lens: CodeLens): CodeLens =
+  ## codeLens/resolve. Titles are already computed eagerly in `codeLenses`
+  ## (cheap now that counting is a single index walk), so resolution is an
+  ## identity passthrough — we keep the endpoint so the client's
+  ## `resolveProvider: true` contract is honoured and future lazy work has a
+  ## home. Defensive: any failure returns the lens untouched.
+  try:
+    result = lens
+  except CatchableError:
+    result = lens

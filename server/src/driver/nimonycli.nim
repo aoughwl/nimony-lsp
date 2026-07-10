@@ -7,7 +7,7 @@
 ## compiler once; any document lifecycle change bumps the generation and clears
 ## the cache, so results never go stale relative to what the drivers can see.
 
-import std/[osproc, os, strutils, streams, tables]
+import std/[osproc, os, strutils, streams, tables, sets, algorithm, times]
 import ../server/state
 
 type
@@ -104,6 +104,61 @@ iterator allSNif*(cfg: Config): string =
       for f in walkFiles(sub / "*.s.nif"):
         yield f
 
+# --- warm-cache retention: never delete on close; bound the pool by size ------
+var
+  cacheUseTick = 0
+  cacheUse = initTable[string, int]()   ## per-module cache dir -> last-use tick
+
+proc recordCacheUse*(cfg: Config; file: string) =
+  ## Mark `file`'s per-module cache most-recently-used, so the LRU prune keeps
+  ## the files you actually touch and evicts the ones you don't. Called on every
+  ## check/artifact access.
+  try:
+    inc cacheUseTick
+    cacheUse[moduleCacheDir(cfg, file)] = cacheUseTick
+  except CatchableError: discard
+
+proc dirSizeBytes(dir: string): int =
+  try:
+    for f in walkDirRec(dir):
+      try: result += int(getFileSize(f))
+      except CatchableError: discard
+  except CatchableError: discard
+
+proc pruneCaches*(cfg: Config; keep: HashSet[string] = initHashSet[string]()) =
+  ## If the whole nimcache/lsp pool exceeds cfg.cacheBudgetBytes, evict entire
+  ## per-module cache dirs — least-recently-used first (in-session use ticks,
+  ## falling back to on-disk mtime across sessions) — until back under budget.
+  ## Never evicts a dir in `keep` (the currently-open documents). No-op when
+  ## pruning is disabled or the budget is non-positive. Fully defensive.
+  if not cfg.cachePrune or cfg.cacheBudgetBytes <= 0: return
+  let base = lspCacheRoot(cfg)
+  if not dirExists(base): return
+  try:
+    var entries: seq[tuple[dir: string, size, recency: int]] = @[]
+    var total = 0
+    for sub in walkDirs(base / "*"):
+      let sz = dirSizeBytes(sub)
+      total += sz
+      var rec = cacheUse.getOrDefault(sub, 0)
+      if rec == 0:
+        try: rec = int(getLastModificationTime(sub).toUnix)
+        except CatchableError: discard
+      entries.add((sub, sz, rec))
+    if total <= cfg.cacheBudgetBytes: return
+    entries.sort(proc (a, b: tuple[dir: string, size, recency: int]): int =
+      cmp(a.recency, b.recency))          # oldest / least-recently-used first
+    for e in entries:
+      if total <= cfg.cacheBudgetBytes: break
+      if e.dir in keep: continue
+      if "/nimcache/lsp/" notin e.dir.replace("\\", "/"): continue   # safety guard
+      try:
+        removeDir(e.dir)
+        cacheUse.del(e.dir)
+        total -= e.size
+      except CatchableError: discard
+  except CatchableError: discard
+
 proc buildArgs(cfg: Config; sub, file, nimcache: string; track: seq[string]): seq[string] =
   result = @[sub]
   if nimcache.len > 0:
@@ -137,11 +192,19 @@ proc run*(cfg: Config; sub: string; file: string; track: seq[string] = @[]): Che
   ## Run `nimony <sub> [--path ...] [track...] <file>` from the project root,
   ## memoized for the current generation. The file path is canonicalized so every
   ## caller (diagnostics, hover, definition, references) shares one warm cache.
+  recordCacheUse(cfg, file)           # LRU: this module was just touched
   let cf = canonFile(cfg, file)
   let key = cacheKey(sub, cf, track)
   checkCache.withValue(key, cached):
     return cached[]
+  let t0 = epochTime()
   result = runUncached(cfg, sub, cf, track)
+  let ms = (epochTime() - t0) * 1000
+  if ms > 250:   # surface cold/slow compiles in the VS Code "Nimony" output channel
+    try: stderr.writeLine("[nimony-lsp] " & sub & " " & cf &
+                          (if track.len > 0: " " & track.join(" ") else: "") &
+                          " took " & $int(ms) & "ms")
+    except CatchableError: discard
   # Only cache a real compiler run (not the "binary missing" sentinel), so a
   # transient misconfiguration doesn't poison the whole generation.
   if result.exitCode != 127:

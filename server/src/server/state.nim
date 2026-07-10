@@ -1,6 +1,6 @@
 ## Server configuration + open-document registry.
 
-import std/[tables, os]
+import std/[tables, os, strutils]
 import ./documents
 import ../lsp/uris
 
@@ -10,6 +10,8 @@ type
     extraPaths*: seq[string]  ## extra --path entries
     projectRoot*: string      ## workspace root (filesystem path)
     daemonPath*: string       ## path to `nimsem serve` binary; "" = disabled
+    cachePrune*: bool         ## bound the nimcache/lsp pool by size (LRU eviction)
+    cacheBudgetBytes*: int    ## byte budget before pruning kicks in; <=0 = unbounded
 
   ServerState* = ref object
     config*: Config
@@ -28,8 +30,18 @@ proc defaultConfig*(): Config =
   # idetools path stays the default — and enabled only when `NIMONY_DAEMON`
   # (or the `daemonPath` init option / client setting) points at a
   # `nimsem serve` binary. Navigation falls back to idetools on any miss.
+  # Warm per-file nimcaches are NEVER deleted on tab close (a reopen would then
+  # pay a full cold nimony compile, ~4s). Disk is bounded instead by a size
+  # budget: once nimcache/lsp exceeds it, whole per-module caches are evicted
+  # least-recently-used first (open documents are never evicted). Default ~1GB;
+  # override via NIMONY_CACHE_BUDGET_MB or the cacheBudgetMB/cachePrune init opts.
+  var budgetMB = 1000
+  let envMB = getEnv("NIMONY_CACHE_BUDGET_MB")
+  if envMB.len > 0:
+    try: budgetMB = parseInt(envMB) except ValueError: discard
   Config(nimonyExe: exe, extraPaths: @[], projectRoot: getCurrentDir(),
-         daemonPath: getEnv("NIMONY_DAEMON"))
+         daemonPath: getEnv("NIMONY_DAEMON"),
+         cachePrune: true, cacheBudgetBytes: budgetMB * 1_000_000)
 
 proc newServerState*(): ServerState =
   ServerState(config: defaultConfig(), docs: initTable[string, Document]())

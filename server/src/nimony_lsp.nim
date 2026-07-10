@@ -4,14 +4,15 @@
 ## response. Feature handlers live in `features/` and the `driver/` layer; this
 ## module owns lifecycle + document synchronization and routes requests.
 
-import std/[json, options, os, tables, sets, strutils]
+import std/[json, options, os, tables, sets, strutils, times]
 from std/posix import poll, TPollfd, Tnfds, POLLIN
 import lsp/[jsonrpc, protocol, uris]
 import server/[state, documents]
 import driver/[diagnostics, idetools, nifindex, nimonycli,
                signature, highlight, rename, workspacesym, semtokens, inlay,
                folding, selection, callhierarchy, extranav, daemon,
-               doclink, codelens, paramhints, typehierarchy]
+               doclink, codelens, paramhints, typehierarchy,
+               nifcache, navindex, codeaction, format, pulldiag, linkededit]
 
 const
   ServerName = "nimony-lsp"
@@ -38,9 +39,46 @@ var pendingLive: HashSet[string]   ## uris with edits not yet checked
 var pendingWarm: HashSet[string]   ## freshly opened uris whose MAIN nimcache
                                    ## must be warmed before nav is fast
 
+var lastDiagnostics = initTable[string, seq[Diagnostic]]()
+  ## Last diagnostics published per uri. The `textDocument/diagnostic` PULL is
+  ## served from this instantly (no recompile) so focusing a tab never blanks the
+  ## squiggles while a check runs — the push path below keeps it fresh.
+
 proc publishDiagnostics(uri: string; diags: seq[Diagnostic]) =
+  lastDiagnostics[uri] = diags
   let params = %*{"uri": uri, "diagnostics": toJsonArray(diags)}
   writeMessage(gOut, notification("textDocument/publishDiagnostics", params))
+
+var gReqCounter = 0
+
+proc serverRequest(meth: string; params: JsonNode) =
+  ## Fire a server→client request with a fresh id. The client's reply arrives as
+  ## a response message (no `method`), which the intake loop silently ignores —
+  ## we don't need the result for refresh/create requests.
+  inc gReqCounter
+  writeMessage(gOut, %*{"jsonrpc": "2.0", "id": "srv-" & $gReqCounter,
+                        "method": meth, "params": params})
+
+var gProgressCounter = 0
+
+proc beginAnalyzeProgress(): string =
+  ## Create a work-done progress token and emit its `begin` so a cold compile
+  ## reads as "working", not hung. Returns the token to pass to `endProgress`.
+  inc gProgressCounter
+  result = "nimony-analyze-" & $gProgressCounter
+  serverRequest("window/workDoneProgress/create", %*{"token": result})
+  writeMessage(gOut, notification("$/progress", %*{
+    "token": result,
+    "value": {"kind": "begin", "title": "Nimony: analyzing…",
+              "cancellable": false}}))
+
+proc reportProgress(token, message: string) =
+  writeMessage(gOut, notification("$/progress", %*{
+    "token": token, "value": {"kind": "report", "message": message}}))
+
+proc endProgress(token: string) =
+  writeMessage(gOut, notification("$/progress", %*{
+    "token": token, "value": {"kind": "end"}}))
 
 proc refreshDiagnostics(uri: string) =
   ## Run nimony check for the document and publish results for every file
@@ -55,6 +93,7 @@ proc refreshDiagnostics(uri: string) =
     reported[pathToUri(absPath)] = true
   if not reported.hasKey(uri):
     publishDiagnostics(uri, @[])
+  serverRequest("workspace/diagnostic/refresh", newJNull())  # pull clients re-fetch the fresh cache
 
 proc liveTempPath(realPath: string): string =
   # Ephemeral sibling of the real file (deleted right after each check), so the
@@ -64,6 +103,14 @@ proc liveTempPath(realPath: string): string =
   # (`nifreader: r.thisModule.len > 0`). It is hidden from the explorer via the
   # extension's `files.exclude` contribution (`**/nimlsp_live_*`) instead.
   realPath.parentDir / ("nimlsp_live_" & extractFilename(realPath))
+
+proc pruneCachesNow() =
+  ## Bound the nimcache/lsp pool by size, never evicting a currently-open doc.
+  var keep = initHashSet[string]()
+  for u in gState.docs.keys:
+    let p = filePath(u)
+    if p.len > 0: keep.incl nimonycli.moduleCacheDir(gState.config, p)
+  nimonycli.pruneCaches(gState.config, keep)
 
 proc cleanupLiveTemp(uri: string) =
   let path = filePath(uri)
@@ -102,6 +149,15 @@ proc buildLiveCtx(uri: string; doc: Document): (idetools.LiveCtx, bool) =
                              tempRel: relTmp,
                              nimcache: root / ".nimlsp_livecache"), true)
 
+proc bufferClean(uri: string; doc: Document): bool =
+  ## True when the doc buffer matches what is on disk — i.e. the warm on-disk
+  ## .s.nif that navindex reads reflects the buffer, so the in-process nav
+  ## (definition/references/highlight) is valid. Cheap: no temp materialized.
+  let path = filePath(uri)
+  if path.len == 0: return false
+  try: return readFile(path) == doc.text
+  except CatchableError: return false
+
 proc refreshDiagnosticsLive(uri, text: string) =
   ## As-you-type diagnostics on the UNSAVED buffer: materialize it to a stable
   ## sibling temp file, run the checker into an ISOLATED nimcache (so it stays
@@ -137,6 +193,7 @@ proc refreshDiagnosticsLive(uri, text: string) =
       publishDiagnostics(pathToUri(absPath), diags)
   if not publishedPrimary:
     publishDiagnostics(uri, @[])          # buffer is clean → clear
+  serverRequest("workspace/diagnostic/refresh", newJNull())  # pull clients re-fetch fresh cache
 
 # --------------------------------------------------------------------------
 # request handlers
@@ -156,6 +213,10 @@ proc handleInitialize(params: JsonNode): JsonNode =
       for x in ep: gState.config.extraPaths.add(x.getStr)
     let dp = opts{"daemonPath"}.getStr("")
     if dp.len > 0: gState.config.daemonPath = dp
+    let cb = opts{"cacheBudgetMB"}
+    if cb != nil and cb.kind == JInt: gState.config.cacheBudgetBytes = cb.getInt * 1_000_000
+    let cp = opts{"cachePrune"}
+    if cp != nil and cp.kind == JBool: gState.config.cachePrune = cp.getBool
   gState.initialized = true
   var tokenTypes = newJArray()
   for t in SemanticTokenTypes: tokenTypes.add(%t)
@@ -169,11 +230,11 @@ proc handleInitialize(params: JsonNode): JsonNode =
       "hoverProvider": true,
       "documentSymbolProvider": true,
       "documentHighlightProvider": true,
-      "completionProvider": {"triggerCharacters": [".", "("]},
+      "completionProvider": {"triggerCharacters": [".", "("], "resolveProvider": true},
       "signatureHelpProvider": {"triggerCharacters": ["(", ","], "retriggerCharacters": [","]},
       "renameProvider": {"prepareProvider": true},
       "workspaceSymbolProvider": true,
-      "inlayHintProvider": true,
+      "inlayHintProvider": {"resolveProvider": true},
       "foldingRangeProvider": true,
       "selectionRangeProvider": true,
       "callHierarchyProvider": true,
@@ -182,10 +243,16 @@ proc handleInitialize(params: JsonNode): JsonNode =
       "declarationProvider": true,
       "typeHierarchyProvider": true,
       "documentLinkProvider": {"resolveProvider": false},
-      "codeLensProvider": {"resolveProvider": false},
+      "codeLensProvider": {"resolveProvider": true},
+      "codeActionProvider": {"codeActionKinds": ["quickfix", "source.organizeImports"]},
+      "documentFormattingProvider": true,
+      "documentRangeFormattingProvider": true,
+      "documentOnTypeFormattingProvider": {"firstTriggerCharacter": "\n"},
+      "linkedEditingRangeProvider": true,
+      "diagnosticProvider": {"interFileDependencies": true, "workspaceDiagnostics": false},
       "semanticTokensProvider": {
         "legend": {"tokenTypes": tokenTypes, "tokenModifiers": tokenMods},
-        "full": true,
+        "full": {"delta": true},
         "range": true
       }
     },
@@ -210,10 +277,13 @@ proc handleDefinition(params: JsonNode): JsonNode =
         if d.isSome and d.get.len > 0: locs = d.get
         else: locs = idetools.definition(gState.config, filePath(uri), pos)
     else:
-      # Warm-daemon path (exact overload resolution) first; idetools fallback.
-      let d = daemon.definition(gState.config, filePath(uri), pos)
-      if d.isSome and d.get.len > 0: locs = d.get
-      else: locs = idetools.definition(gState.config, filePath(uri), pos)
+      # Clean buffer: answer in-process from the warm .s.nif (no spawn, cross-module)
+      # FIRST; fall through to the warm daemon then idetools only if it comes up empty.
+      locs = navindex.definitionAt(gState.config, filePath(uri), pos)
+      if locs.len == 0:
+        let d = daemon.definition(gState.config, filePath(uri), pos)
+        if d.isSome and d.get.len > 0: locs = d.get
+        else: locs = idetools.definition(gState.config, filePath(uri), pos)
     if locs.len == 0:
       # No value symbol under the cursor — maybe it's a MODULE name in an import
       # line (`import std/syncio`). Resolve it to the module's source file so F12
@@ -243,9 +313,12 @@ proc handleReferences(params: JsonNode): JsonNode =
       if locs.len == 0:                                   # mid-edit fallback
         locs = idetools.references(gState.config, filePath(uri), pos, roots)
     else:
-      let d = daemon.references(gState.config, filePath(uri), pos)
-      if d.isSome and d.get.len > 0: locs = d.get
-      else: locs = idetools.references(gState.config, filePath(uri), pos, roots)
+      # Clean buffer: in-process cross-module references from the warm .s.nif FIRST.
+      locs = navindex.referencesAt(gState.config, filePath(uri), pos, includeDecl = true)
+      if locs.len == 0:
+        let d = daemon.references(gState.config, filePath(uri), pos)
+        if d.isSome and d.get.len > 0: locs = d.get
+        else: locs = idetools.references(gState.config, filePath(uri), pos, roots)
     result = toJsonArray(locs)
   finally:
     if wrote: cleanupLiveTemp(uri)
@@ -284,9 +357,16 @@ proc handleSignatureHelp(params: JsonNode): JsonNode =
   if sh.isSome: %sh.get else: newJNull()
 
 proc handleDocumentHighlight(params: JsonNode): JsonNode =
-  let doc = gState.getDoc(textDocumentUri(params))
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
   if doc == nil: return newJArray()
-  toJsonArray(highlight.documentHighlights(gState.config, doc, positionParam(params)))
+  let pos = positionParam(params)
+  # Clean buffer: in-process highlight from the warm .s.nif (no spawn) FIRST;
+  # fall back to the idetools path when it is empty or the buffer is dirty.
+  if bufferClean(uri, doc):
+    let hs = navindex.highlightsAt(gState.config, filePath(uri), pos)
+    if hs.len > 0: return toJsonArray(hs)
+  toJsonArray(highlight.documentHighlights(gState.config, doc, pos))
 
 proc handlePrepareRename(params: JsonNode): JsonNode =
   let doc = gState.getDoc(textDocumentUri(params))
@@ -384,6 +464,130 @@ proc handleImplementation(params: JsonNode): JsonNode =
   let locs = extranav.implementation(gState.config, doc, positionParam(params))
   if locs.len == 0: newJNull() else: toJsonArray(locs)
 
+proc handleCompletionResolve(params: JsonNode): JsonNode =
+  ## completionItem/resolve: the client sends back a single CompletionItem to be
+  ## enriched with detail/documentation. Parse it, resolve, re-serialize. Any
+  ## malformed input echoes the original params unchanged.
+  if params == nil or params.kind != JObject:
+    return params
+  var item = CompletionItem(
+    label: params{"label"}.getStr(""),
+    detail: params{"detail"}.getStr(""),
+    documentation: (block:
+      let d = params{"documentation"}
+      if d != nil and d.kind == JObject: d{"value"}.getStr("")
+      elif d != nil and d.kind == JString: d.getStr("")
+      else: ""),
+    insertText: params{"insertText"}.getStr(""))
+  let k = params{"kind"}.getInt(0)
+  if k >= ord(low(CompletionItemKind)) and k <= ord(high(CompletionItemKind)):
+    item.kind = CompletionItemKind(k)
+  result = %nifindex.resolveCompletion(gState.config, item)
+
+proc handleCodeLensResolve(params: JsonNode): JsonNode =
+  ## codeLens/resolve. Titles are computed eagerly by codelens.codeLenses, so
+  ## this reconstructs the lens from the client's payload and routes it through
+  ## the (identity) resolver. Defensive: any failure reflects params unchanged.
+  try:
+    var lens = CodeLens(`range`: getRange(params["range"]))
+    let cmd = params{"command"}
+    if cmd != nil and cmd.kind == JObject:
+      lens.command = Command(title: cmd{"title"}.getStr(""),
+                             command: cmd{"command"}.getStr(""))
+    %codelens.resolveCodeLens(gState.config, lens)
+  except CatchableError:
+    params
+
+proc handleInlayHintResolve(params: JsonNode): JsonNode =
+  ## `inlayHint/resolve`: unlike textDocument/* requests, params here IS the
+  ## InlayHint object itself (no `textDocument` wrapper) — exactly what
+  ## `handleInlayHint` returned, echoed back by the client, including our
+  ## `data` payload. The uri to resolve against travels in `data.uri` since
+  ## LSP gives us no other way to recover it.
+  try:
+    if params == nil: return params
+    var hint: InlayHint
+    hint.position = positionParam(params)          # params.position
+    hint.label = params{"label"}.getStr("")
+    hint.kind = InlayHintKind(params{"kind"}.getInt(ord(ihkType)))
+    hint.paddingLeft = params{"paddingLeft"}.getBool(false)
+    hint.paddingRight = params{"paddingRight"}.getBool(false)
+    let dataNode = params{"data"}
+    var uri = ""
+    if dataNode != nil and dataNode.kind == JObject:
+      hint.data = dataNode
+      uri = dataNode{"uri"}.getStr("")
+    if uri.len == 0: return params
+    let doc = gState.getDoc(uri)
+    if doc == nil: return params
+    %inlay.resolveInlay(gState.config, doc, hint)
+  except CatchableError:
+    params
+
+proc handleSemanticTokensDelta(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return %*{"data": newJArray()}
+  let previousResultId = params{"previousResultId"}.getStr("")
+  let r = semtokens.semanticTokensDelta(gState.config, doc, previousResultId)
+  if r.isDelta: %r.delta else: %r.full
+
+proc handleCodeAction(params: JsonNode): JsonNode =
+  let uri = textDocumentUri(params)
+  let doc = gState.getDoc(uri)
+  if doc == nil: return newJArray()
+  let rng = rangeParam(params)
+  var diags: seq[Diagnostic] = @[]
+  let ctx = params{"context"}
+  if ctx != nil:
+    let da = ctx{"diagnostics"}
+    if da != nil and da.kind == JArray:
+      for dj in da:
+        var sev = dsError
+        let sevOrd = dj{"severity"}.getInt(ord(dsError))
+        if sevOrd >= ord(low(DiagnosticSeverity)) and sevOrd <= ord(high(DiagnosticSeverity)):
+          sev = DiagnosticSeverity(sevOrd)
+        diags.add Diagnostic(
+          `range`: getRange(dj{"range"}),
+          severity: sev,
+          source: dj{"source"}.getStr(""),
+          message: dj{"message"}.getStr(""))
+  toJsonArray(codeaction.codeActions(gState.config, doc, rng, diags))
+
+proc handleFormatting(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  toJsonArray(format.formatDocument(gState.config, doc))
+
+proc handleRangeFormatting(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  toJsonArray(format.formatRange(gState.config, doc, rangeParam(params)))
+
+proc handleOnTypeFormatting(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJArray()
+  let pos = positionParam(params)
+  let ch = params{"ch"}.getStr("")
+  toJsonArray(format.onTypeFormat(gState.config, doc, pos, ch))
+
+proc handleLinkedEditingRange(params: JsonNode): JsonNode =
+  let doc = gState.getDoc(textDocumentUri(params))
+  if doc == nil: return newJNull()
+  let r = linkededit.linkedEditingRanges(gState.config, doc, positionParam(params))
+  if r.isSome: %r.get else: newJNull()
+
+proc handleDiagnosticPull(params: JsonNode): JsonNode =
+  let uri = textDocumentUri(params)
+  # Serve the LAST PUSHED diagnostics instantly — never recompile on a pull. The
+  # push path (didOpen warm / didChange live / didSave) keeps `lastDiagnostics`
+  # fresh, so focusing a tab returns immediately instead of blanking the squiggles
+  # for the duration of a `nimony check`. Only compute if we have nothing cached
+  # yet (a pull that races ahead of the first push).
+  if lastDiagnostics.hasKey(uri):
+    return %*{"kind": "full", "items": toJsonArray(lastDiagnostics[uri])}
+  let doc = gState.getDoc(uri)
+  pulldiag.diagnosticReport(gState.config, doc)
+
 # --------------------------------------------------------------------------
 # notification handlers (document sync)
 # --------------------------------------------------------------------------
@@ -402,6 +606,8 @@ proc handleDidOpen(params: JsonNode) =
   # until something finally compiles the project. Warming eagerly means the burst
   # that follows didOpen hits a WARM cache and resolves instantly.
   pendingWarm.incl uri
+  # NB: pruning runs on didClose, NOT here — a full-pool size walk on the open
+  # path would delay the very diagnostics/underlines this open is meant to show.
 
 proc handleDidChange(params: JsonNode) =
   bumpCheckGeneration()
@@ -426,6 +632,7 @@ proc handleDidSave(params: JsonNode) =
   let uri = textDocumentUri(params)
   pendingLive.excl uri                      # the on-save real check supersedes
   cleanupLiveTemp(uri)                      # disk is current; drop the temp
+  nifcache.invalidate(gState.config, filePath(uri))  # new .s.nif after this recheck
   refreshDiagnostics(uri)
 
 proc handleDidClose(params: JsonNode) =
@@ -434,17 +641,14 @@ proc handleDidClose(params: JsonNode) =
   pendingLive.excl uri
   pendingWarm.excl uri
   cleanupLiveTemp(uri)
-  # Reclaim this file's per-file nimcache so nimcache/lsp/ doesn't grow unbounded
-  # over a session. A reopen pays one cold compile to re-warm — acceptable. Guard
-  # the path so we only ever remove inside nimcache/lsp/.
-  try:
-    let path = filePath(uri)
-    if path.len > 0:
-      let dir = nimonycli.moduleCacheDir(gState.config, path)
-      if "/nimcache/lsp/" in dir.replace("\\", "/") and dirExists(dir):
-        removeDir(dir)
-  except CatchableError: discard
+  nifcache.invalidate(gState.config, filePath(uri))
   gState.closeDoc(uri)
+  # Do NOT delete this file's warm nimcache on close: a reopen would then pay a
+  # full cold nimony compile (~4s) — the "lost my underlines, now it hangs again"
+  # churn when VS Code recycles a preview tab. Keep every cache warm and bound
+  # total disk with a size-budgeted LRU prune of the whole nimcache/lsp pool
+  # instead, never evicting a still-open document's cache.
+  pruneCachesNow()
 
 # --------------------------------------------------------------------------
 # dispatch
@@ -467,9 +671,19 @@ proc dispatchRequest(m: Message): JsonNode =
   of "textDocument/rename": response(m.id, handleRename(m.params))
   of "textDocument/inlayHint": response(m.id, handleInlayHint(m.params))
   of "textDocument/semanticTokens/full": response(m.id, handleSemanticTokensFull(m.params))
+  of "textDocument/semanticTokens/full/delta": response(m.id, handleSemanticTokensDelta(m.params))
   of "textDocument/semanticTokens/range": response(m.id, handleSemanticTokensFull(m.params))
   of "textDocument/documentLink": response(m.id, handleDocumentLink(m.params))
   of "textDocument/codeLens": response(m.id, handleCodeLens(m.params))
+  of "codeLens/resolve": response(m.id, handleCodeLensResolve(m.params))
+  of "completionItem/resolve": response(m.id, handleCompletionResolve(m.params))
+  of "inlayHint/resolve": response(m.id, handleInlayHintResolve(m.params))
+  of "textDocument/codeAction": response(m.id, handleCodeAction(m.params))
+  of "textDocument/formatting": response(m.id, handleFormatting(m.params))
+  of "textDocument/rangeFormatting": response(m.id, handleRangeFormatting(m.params))
+  of "textDocument/onTypeFormatting": response(m.id, handleOnTypeFormatting(m.params))
+  of "textDocument/linkedEditingRange": response(m.id, handleLinkedEditingRange(m.params))
+  of "textDocument/diagnostic": response(m.id, handleDiagnosticPull(m.params))
   of "textDocument/declaration": response(m.id, handleDeclaration(m.params))
   of "textDocument/prepareTypeHierarchy": response(m.id, handlePrepareTypeHierarchy(m.params))
   of "typeHierarchy/supertypes": response(m.id, handleSupertypes(m.params))
@@ -484,9 +698,36 @@ proc dispatchRequest(m: Message): JsonNode =
   of "textDocument/implementation": response(m.id, handleImplementation(m.params))
   else: errorResponse(m.id, MethodNotFound, "unhandled method: " & m.meth)
 
+proc handleDidChangeWatchedFiles(params: JsonNode) =
+  ## A file changed on disk outside our edit stream (git checkout, another
+  ## editor, a build). Bump the check generation so the next request recompiles,
+  ## and drop every parsed .s.nif buffer nifcache has memoized so it re-reads the
+  ## fresh artifacts. (nifcache's mtime check self-heals too; this is belt-and-braces.)
+  bumpCheckGeneration()
+  nifcache.invalidateAll()
+
+proc registerWatchedFiles() =
+  ## Ask the client to watch Nim(ony) sources so it sends didChangeWatchedFiles.
+  ## Dynamic registration (there is no static server capability for this); the
+  ## client's response id is ignored by our loop, which is harmless.
+  let params = %*{
+    "registrations": [{
+      "id": "nimony-watched-files",
+      "method": "workspace/didChangeWatchedFiles",
+      "registerOptions": {
+        "watchers": [
+          {"globPattern": "**/*.nim"},
+          {"globPattern": "**/*.nimble"}
+        ]
+      }
+    }]
+  }
+  writeMessage(gOut, %*{"jsonrpc": "2.0", "id": "reg-watched-files",
+                        "method": "client/registerCapability", "params": params})
+
 proc dispatchNotification(m: Message) =
   case m.meth
-  of "initialized": discard
+  of "initialized": registerWatchedFiles()
   of "exit":
     for uri in gState.docs.keys: cleanupLiveTemp(uri)
     daemon.shutdown()
@@ -495,6 +736,7 @@ proc dispatchNotification(m: Message) =
   of "textDocument/didChange": handleDidChange(m.params)
   of "textDocument/didSave": handleDidSave(m.params)
   of "textDocument/didClose": handleDidClose(m.params)
+  of "workspace/didChangeWatchedFiles": handleDidChangeWatchedFiles(m.params)
   else: discard
 
 proc flushPending() =
@@ -560,12 +802,23 @@ proc serve(m: Message) =
   # response (so the client isn't left waiting) and the loop keeps serving.
   try:
     if m.isNotification:
+      let t0 = epochTime()
       dispatchNotification(m)
+      let ms = (epochTime() - t0) * 1000
+      if ms > 250:
+        try: stderr.writeLine("[nimony-lsp] notif " & m.meth & " took " & $int(ms) & "ms")
+        except CatchableError: discard
     elif m.isRequest:
       if not gState.initialized and m.meth != "initialize":
         writeMessage(gOut, errorResponse(m.id, ServerNotInitialized, "server not initialized"))
       else:
-        writeMessage(gOut, dispatchRequest(m))
+        let t0 = epochTime()
+        let resp = dispatchRequest(m)
+        let ms = (epochTime() - t0) * 1000
+        if ms > 250:   # shown in the VS Code "Nimony Language Server" output channel
+          try: stderr.writeLine("[nimony-lsp] " & m.meth & " took " & $int(ms) & "ms")
+          except CatchableError: discard
+        writeMessage(gOut, resp)
   except CatchableError as e:
     if m.isRequest:
       try: writeMessage(gOut, errorResponse(m.id, InternalError, "handler error: " & e.msg))
@@ -578,6 +831,20 @@ const ContentModified = -32801   ## LSP: "result is stale, discard" (silenced by
 proc bgKey(m: Message): string =
   let u = if m.params != nil: textDocumentUri(m.params) else: ""
   m.meth & "\x1f" & u
+
+proc rank(m: Message): int =
+  ## Lower rank = served first. A single edit/cursor-move fires a BURST of
+  ## background requests; serve the cheap in-process NIF-walk features
+  ## (inlayHint, semanticTokens*, documentSymbol, foldingRange, documentLink)
+  ## BEFORE the expensive ones (codeLens does a cross-file reference walk), so
+  ## the fast, visible results paint first. Ties keep arrival order.
+  case m.meth
+  of "textDocument/inlayHint", "inlayHint/resolve",
+     "textDocument/semanticTokens/full", "textDocument/semanticTokens/full/delta",
+     "textDocument/semanticTokens/range", "textDocument/documentSymbol",
+     "textDocument/foldingRange", "textDocument/documentLink": 0
+  of "textDocument/codeLens", "codeLens/resolve": 2
+  else: 1
 
 proc enqueueBackground(m: Message) =
   ## Queue a background request, superseding any earlier queued one of the SAME
@@ -642,7 +909,17 @@ proc main() =
       let uri = popAny(pendingWarm)
       if uri.len > 0 and gState.getDoc(uri) != nil:
         pendingLive.excl uri            # this warm publishes fresh diagnostics too
+        # Surface the cold compile as work-done progress so the ~3s reads as
+        # working, not hung.
+        let tok = beginAnalyzeProgress()
+        reportProgress(tok, extractFilename(filePath(uri)))
         refreshDiagnostics(uri)
+        endProgress(tok)
+        # The MAIN nimcache (and its .s.nif) is now warm. Nudge the client to
+        # re-request the cheap NIF-walk features so type hints / tokens land
+        # WITH the diagnostics instead of ~1.5s later against a cold cache.
+        serverRequest("workspace/semanticTokens/refresh", newJNull())
+        serverRequest("workspace/inlayHint/refresh", newJNull())
       continue
 
     # Idle housekeeping: with edits pending and no background work queued, wait
@@ -663,10 +940,14 @@ proc main() =
 
     # Serve ONE background request, then loop back — so a hover/completion that
     # arrives mid-burst is drained and served BEFORE the next background item,
-    # never stuck behind the whole semantic-tokens/inlay/codeLens tail.
+    # never stuck behind the whole semantic-tokens/inlay/codeLens tail. Pick the
+    # lowest-rank queued item (cheap NIF-walk features before expensive codeLens).
     if bgQueue.len > 0:
-      let m = bgQueue[0]
-      bgQueue.delete(0)
+      var best = 0
+      for i in 1 ..< bgQueue.len:
+        if rank(bgQueue[i]) < rank(bgQueue[best]): best = i
+      let m = bgQueue[best]
+      bgQueue.delete(best)
       serve(m)
 
 when isMainModule:

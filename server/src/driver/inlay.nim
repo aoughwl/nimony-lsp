@@ -2,86 +2,35 @@
 ## declarations that have no explicit type annotation.
 ##
 ## We read the semchecked `.s.nif` artifact (which has all inferred types
-## filled in), walk its declaration nodes, and for each value declaration
-## whose source text carries no `:` annotation we emit a `: <Type>` hint
-## positioned right after the variable name.
+## filled in) via the shared `nifcache`, walk its declaration nodes, and for
+## each value declaration whose source text carries no `:` annotation we
+## emit a `: <Type>` hint positioned right after the variable name.
+##
+## `inlayHint/resolve`: the client sends back exactly the InlayHint we
+## returned (round-tripping its `data` payload). We attach a `TextEdit` that
+## materializes the `": " & Type` annotation at `hint.position`, plus a
+## `tooltip` carrying the full type — this is pure string surgery on the
+## already-computed hint, no re-compile needed.
 ##
 ## Coordinate conventions (see ARCHITECTURE.md):
 ##   - NIF PackedLineInfo: line 1-based, col 0-based.  LSP line = nif.line - 1.
 ##
-## Everything is wrapped so that any failure yields `@[]` — the LSP process
-## must stay alive.
+## Everything is wrapped so that any failure yields `@[]` (or the untouched
+## hint, for resolve) — the LSP process must stay alive.
 
-import std/[os, strutils, sets]
+import std/[json, strutils, sets]
 import ../lsp/protocol
 import ../lsp/uris
 import ../server/state
 import ../server/documents
-import ./nimonycli
+import ./nifcache
 
 # Nimony NIF libraries (paths added in config.nims).
 import bitabs
-import nifstreams
+import nifstreams          # for the shared `pool` (literals/tags/syms/files)
 import nifcursors
 import lineinfos
 import symparser
-from nifreader import processDirectives
-
-# --------------------------------------------------------------------------
-# Locating the `.s.nif` artifact for a source file (mirrors nifindex helpers,
-# kept local so this module is self-contained).
-# --------------------------------------------------------------------------
-
-proc relFileFor(cfg: Config; file: string): string =
-  if cfg.projectRoot.len > 0 and file.isAbsolute:
-    result = relativePath(file, cfg.projectRoot, '/')
-  else:
-    result = file
-  result = result.replace('\\', '/')
-
-proc nimcacheDir(cfg: Config): string =
-  let root = if cfg.projectRoot.len > 0 and dirExists(cfg.projectRoot): cfg.projectRoot
-             else: getCurrentDir()
-  result = root / "nimcache"
-
-proc pathsMatch(stored, rel: string): bool =
-  let a = stored.replace('\\', '/')
-  let b = rel.replace('\\', '/')
-  result = a == b or a.endsWith("/" & b) or b.endsWith("/" & a) or
-           extractFilename(a) == extractFilename(b) and (a.endsWith(b) or b.endsWith(a))
-
-proc firstStmtsFile(nifPath: string): string =
-  result = ""
-  var s = nifstreams.open(nifPath)
-  try:
-    discard processDirectives(s.r)
-    let t = nifstreams.next(s)
-    if t.kind == ParLe:
-      let up = unpack(pool.man, t.info)
-      if up.file.isValid:
-        result = pool.files[up.file]
-  finally:
-    nifstreams.close s
-
-proc findSNif(cfg: Config; file: string): string =
-  result = ""
-  let dir = nimonycli.moduleCacheDir(cfg, file)
-  if not dirExists(dir): return ""
-  let rel = relFileFor(cfg, file)
-  for f in walkFiles(dir / "*.s.nif"):
-    var stored = ""
-    try:
-      stored = firstStmtsFile(f)
-    except CatchableError:
-      continue
-    if stored.len > 0 and pathsMatch(stored, rel):
-      return f
-  return ""
-
-proc ensureArtifact(cfg: Config; file: string): string =
-  let rel = relFileFor(cfg, file)
-  discard nimonycli.run(cfg, "check", rel)
-  result = findSNif(cfg, file)
 
 # --------------------------------------------------------------------------
 # Small helpers
@@ -171,18 +120,10 @@ proc inlayHints*(cfg: Config; doc: Document; rng: Range): seq[InlayHint] =
   try:
     let file = uriToPath(doc.uri)
     if file.len == 0: return result
-    let nifPath = ensureArtifact(cfg, file)
-    if nifPath.len == 0 or not fileExists(nifPath): return result
+    let art = nifcache.getArtifact(cfg, file)
+    if art == nil: return result
 
-    var s = nifstreams.open(nifPath)
-    var buf: TokenBuf
-    try:
-      discard processDirectives(s.r)
-      buf = fromStream(s)
-    finally:
-      nifstreams.close s
-
-    var n = beginRead(buf)
+    var n = beginRead(art.buf)
     if n.kind != ParLe: return result
 
     # Full depth-first walk of every node so nested declarations are covered.
@@ -217,7 +158,8 @@ proc inlayHints*(cfg: Config; doc: Document; rng: Range): seq[InlayHint] =
                         label: ": " & typeName,
                         kind: ihkType,
                         paddingLeft: false,
-                        paddingRight: false)
+                        paddingRight: false,
+                        data: %*{"uri": doc.uri})
         inc depth
         inc n                         # descend / recurse into every node
       of ParRi:
@@ -230,3 +172,32 @@ proc inlayHints*(cfg: Config; doc: Document; rng: Range): seq[InlayHint] =
         inc n
   except CatchableError:
     return @[]
+
+# --------------------------------------------------------------------------
+# inlayHint/resolve
+# --------------------------------------------------------------------------
+
+proc resolveInlay*(cfg: Config; doc: Document; hint: InlayHint): InlayHint =
+  ## Materialize the hint's own label as a real edit at its position, and
+  ## surface the full type as a tooltip. `hint.label` is already exactly
+  ## `": " & typeName` (see `inlayHints` above), so this is pure surgery on
+  ## the hint the client handed back — no re-parse of the NIF artifact
+  ## needed. `cfg`/`doc` are accepted for parity with the contract and to
+  ## leave room for a future richer tooltip without changing callers; on any
+  ## trouble we fall back to returning the hint unchanged.
+  result = hint
+  try:
+    if hint.label.len == 0: return result
+    var typeName = hint.label
+    if typeName.startsWith(": "):
+      typeName = typeName[2 .. ^1]
+    elif typeName.startsWith(":"):
+      typeName = typeName[1 .. ^1]
+    typeName = typeName.strip()
+    if typeName.len == 0: return result
+    result.textEdits = @[TextEdit(
+      range: Range(start: hint.position, `end`: hint.position),
+      newText: hint.label)]
+    result.tooltip = typeName
+  except CatchableError:
+    return hint

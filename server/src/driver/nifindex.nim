@@ -16,6 +16,7 @@ import ../lsp/protocol
 import ../lsp/uris
 import ../server/state
 import ./nimonycli
+import ./nifcache
 import ./idetools
 
 # Nimony NIF libraries (paths added in config.nims).
@@ -180,16 +181,12 @@ proc collectFields(typeCursor: Cursor): seq[DocumentSymbol] =
 proc documentSymbols*(cfg: Config; file: string): seq[DocumentSymbol] =
   result = @[]
   try:
-    let nifPath = ensureArtifact(cfg, file)
-    if nifPath.len == 0 or not fileExists(nifPath): return result
-    var s = nifstreams.open(nifPath)
-    var buf: TokenBuf
-    try:
-      discard processDirectives(s.r)
-      buf = fromStream(s)
-    finally:
-      nifstreams.close s
-    var n = beginRead(buf)
+    # Source the parsed buffer from the shared artifact memo (nifcache) instead
+    # of re-opening/re-parsing the `.s.nif` on every request. `art.buf` is a
+    # mutable lvalue through the ref, so `beginRead` reads it in place.
+    let art = nifcache.getArtifact(cfg, file)
+    if art == nil: return result
+    var n = beginRead(art.buf)
     if n.kind != ParLe: return result
     inc n                     # descend past the `stmts` tag
     while n.kind != ParRi and n.kind != EofToken:
@@ -845,21 +842,86 @@ proc completions*(cfg: Config; file: string; pos: Position;
     discard
   var seen = initHashSet[string]()
   try:
-    let nifPath = ensureArtifact(cfg, file)
-    if nifPath.len == 0 or not fileExists(nifPath): return result
+    # Parsed buffer from the shared artifact memo (nifcache); reused across the
+    # documentSymbols call below (also memoized) and the imported-export walk.
+    let art = nifcache.getArtifact(cfg, file)
+    if art == nil: return result
     # Current module top-level symbols.
     for ds in documentSymbols(cfg, file):
       if ds.name.len > 0 and ds.name notin seen:
         seen.incl ds.name
         result.add CompletionItem(label: ds.name, kind: toCompletionKind(ds.kind))
     # Exported symbols of imported modules.
-    var s = nifstreams.open(nifPath)
-    var buf: TokenBuf
-    try:
-      discard processDirectives(s.r)
-      buf = fromStream(s)
-    finally:
-      nifstreams.close s
-    addImportedExports(cfg, file, buf, result, seen)
+    addImportedExports(cfg, file, art.buf, result, seen)
   except CatchableError:
     return result
+
+# --------------------------------------------------------------------------
+# completionItem/resolve — lazily enrich a chosen item with detail + docs
+# --------------------------------------------------------------------------
+
+proc declSourceLoc(cfg: Config; label: string): Option[tuple[file: string, line: int]] =
+  ## Best-effort: locate a top-level decl named `label` across every workspace
+  ## `.s.nif` and return its source file (absolute) + 0-based line. `none` if it
+  ## can't be found. Bounded scan; reads existing artifacts only (no compile).
+  result = none(tuple[file: string, line: int])
+  var scanned = 0
+  for nifPath in nimonycli.allSNif(cfg):
+    inc scanned
+    if scanned > 256: break
+    var buf: TokenBuf
+    try:
+      var s = nifstreams.open(nifPath)
+      try:
+        discard processDirectives(s.r)
+        buf = fromStream(s)
+      finally:
+        nifstreams.close s
+    except CatchableError:
+      continue
+    var n = beginRead(buf)
+    if n.kind != ParLe: continue
+    inc n
+    while n.kind != ParRi and n.kind != EofToken:
+      if n.kind == ParLe:
+        let tn = pool.tags[n.tagId]
+        if classifyKind(tn).isSome:
+          var d = n
+          inc d
+          if d.kind == SymbolDef and demangle(pool.syms[d.symId]) == label:
+            let up = unpack(pool.man, d.info)
+            if up.file.isValid and up.line > 0:
+              let stored = pool.files[up.file]
+              var abs = stored
+              if not abs.isAbsolute and cfg.projectRoot.len > 0:
+                abs = cfg.projectRoot / stored
+              return some((file: abs, line: int(up.line) - 1))
+        skip n
+      else:
+        skip n
+  return
+
+proc resolveCompletion*(cfg: Config; item: CompletionItem): CompletionItem =
+  ## Lazily fill `detail` / `documentation` for a completion item the client
+  ## asked to resolve. Returns the item unchanged when both are already present
+  ## or nothing can be found. Never raises.
+  result = item
+  try:
+    if item.label.len == 0: return result
+    if item.detail.len > 0 and item.documentation.len > 0: return result
+    let loc = declSourceLoc(cfg, item.label)
+    if loc.isNone: return result
+    let (srcFile, lineIdx) = loc.get
+    if srcFile.len == 0 or not fileExists(srcFile): return result
+    let lines = readFile(srcFile).splitLines
+    if lineIdx < 0 or lineIdx >= lines.len: return result
+    let (sig, sigEnd) = collectSignature(lines, lineIdx)
+    if result.detail.len == 0 and sig.len > 0:
+      # Concise, single-line detail: the head of the (possibly multi-line) sig.
+      result.detail = sig.splitLines()[0]
+    if result.documentation.len == 0:
+      let doc = collectDoc(lines, lineIdx, sigEnd)
+      if doc.len > 0:
+        result.documentation = doc
+  except CatchableError:
+    return item
