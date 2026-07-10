@@ -76,7 +76,7 @@ proc firstStmtsFile(nifPath: string): string =
 proc findSNif(cfg: Config; file: string): string =
   ## Absolute path to the `.s.nif` whose module body is `file`, or "".
   result = ""
-  let dir = nimcacheDir(cfg)
+  let dir = nimonycli.moduleCacheDir(cfg, file)
   if not dirExists(dir): return ""
   let rel = relFileFor(cfg, file)
   for f in walkFiles(dir / "*.s.nif"):
@@ -225,16 +225,14 @@ proc typeDefinition*(cfg: Config; doc: Document; pos: Position): seq[Location] =
     let loc = findTypeDefIn(cfg, buf, typeName)
     if loc.isSome: return @[loc.get]
     # Otherwise search the other module artifacts (imported types).
-    let dir = nimcacheDir(cfg)
-    if dirExists(dir):
-      for f in walkFiles(dir / "*.s.nif"):
-        if f == nifPath: continue
-        try:
-          var b2 = loadBuf(f)
-          let l2 = findTypeDefIn(cfg, b2, typeName)
-          if l2.isSome: return @[l2.get]
-        except CatchableError:
-          continue
+    for f in nimonycli.allSNif(cfg):
+      if f == nifPath: continue
+      try:
+        var b2 = loadBuf(f)
+        let l2 = findTypeDefIn(cfg, b2, typeName)
+        if l2.isSome: return @[l2.get]
+      except CatchableError:
+        continue
     return @[]
   except CatchableError:
     return @[]

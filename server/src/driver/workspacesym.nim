@@ -17,6 +17,7 @@ import ../lsp/protocol
 import ../lsp/uris
 import ../server/state
 import ./nifindex
+import ./nimonycli
 
 # Nimony NIF libraries (paths added in config.nims).
 import bitabs
@@ -96,10 +97,8 @@ proc collectFromArtifact(cfg: Config; nifPath: string; query: string;
 proc workspaceSymbols*(cfg: Config; query: string): seq[SymbolInformation] =
   result = @[]
   try:
-    let dir = nifindex.nimcacheDir(cfg)
-    if not dirExists(dir): return result
     var seen = initHashSet[string]()
-    for f in walkFiles(dir / "*.s.nif"):
+    for f in nimonycli.allSNif(cfg):
       if result.len >= MaxResults: break
       try:
         collectFromArtifact(cfg, f, query, seen, result)

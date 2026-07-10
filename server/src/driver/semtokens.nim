@@ -122,7 +122,7 @@ proc firstStmtsFile(nifPath: string): string =
 proc findSNif(cfg: Config; file: string): string =
   ## Absolute path to the `.s.nif` whose module body is `file`, or "".
   result = ""
-  let dir = nimcacheDir(cfg)
+  let dir = nimonycli.moduleCacheDir(cfg, file)
   if not dirExists(dir): return ""
   let rel = relFileFor(cfg, file)
   for f in walkFiles(dir / "*.s.nif"):

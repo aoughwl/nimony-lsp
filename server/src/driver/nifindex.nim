@@ -116,7 +116,7 @@ proc findSNif*(cfg: Config; file: string): string =
   ## Return the absolute path to the `.s.nif` whose module body is `file`,
   ## or "" if none can be found.
   result = ""
-  let dir = nimcacheDir(cfg)
+  let dir = nimonycli.moduleCacheDir(cfg, file)
   if not dirExists(dir): return ""
   let rel = relFileFor(cfg, file)
   for f in walkFiles(dir / "*.s.nif"):
@@ -348,11 +348,11 @@ proc hoverAt*(cfg: Config; file: string; pos: Position;
 # completions
 # --------------------------------------------------------------------------
 
-proc addImportedExports(cfg: Config; buf: var TokenBuf;
+proc addImportedExports(cfg: Config; file: string; buf: var TokenBuf;
                         items: var seq[CompletionItem]; seen: var HashSet[string]) =
   ## Walk top-level `import` nodes, resolve each imported module's `.s.nif`
-  ## in nimcache, and add its exported symbols as completions.
-  let dir = nimcacheDir(cfg)
+  ## in `file`'s per-file cache, and add its exported symbols as completions.
+  let dir = nimonycli.moduleCacheDir(cfg, file)
   var modIds: seq[string] = @[]
   block scan:
     var n = beginRead(buf)
@@ -741,10 +741,10 @@ proc dotMemberCompletions(cfg: Config; file: string; pos: Position;
     repaired[pos.line] = line[0 ..< dotPos]
   let dir = if file.isAbsolute: parentDir(file) else: getCurrentDir()
   let tmp = dir / ("nimlsp_dot_" & $getCurrentProcessId() & ".nim")
-  # Snapshot nimcache so we can delete exactly the artifacts this temp compile
-  # produces — otherwise every dot-completion permanently grows nimcache and
-  # pollutes workspace-symbol results.
-  let ncdir = nimcacheDir(cfg)
+  # Snapshot the temp file's OWN per-file cache so we can delete exactly the
+  # artifacts this temp compile produces (its whole module graph, incl. the
+  # receiver's type and its imported modules, lands here).
+  let ncdir = nimonycli.moduleCacheDir(cfg, tmp)
   var ncBefore = initHashSet[string]()
   if dirExists(ncdir):
     for f in walkFiles(ncdir / "*"): ncBefore.incl f
@@ -860,6 +860,6 @@ proc completions*(cfg: Config; file: string; pos: Position;
       buf = fromStream(s)
     finally:
       nifstreams.close s
-    addImportedExports(cfg, buf, result, seen)
+    addImportedExports(cfg, file, buf, result, seen)
   except CatchableError:
     return result

@@ -82,6 +82,28 @@ proc lspCacheDir(cfg: Config; canonName: string): string =
   if key.len == 0: key = "main"
   root / "nimcache" / "lsp" / key
 
+proc moduleCacheDir*(cfg: Config; file: string): string =
+  ## The per-module nimcache for `file` — where its LSP check writes its .s.nif
+  ## AND where the artifact readers (completion/inlay/symbols/semtokens/…) must
+  ## look. Both sides call this with the same file, so they always agree on the
+  ## location despite the per-file isolation.
+  lspCacheDir(cfg, canonFile(cfg, file))
+
+proc lspCacheRoot(cfg: Config): string =
+  (if cfg.projectRoot.len > 0 and dirExists(cfg.projectRoot): cfg.projectRoot
+   else: getCurrentDir()) / "nimcache" / "lsp"
+
+iterator allSNif*(cfg: Config): string =
+  ## Every module `.s.nif` across ALL per-file LSP caches — for cross-module
+  ## searches (imported-type definitions, type-hierarchy super/subtypes,
+  ## workspace symbols). A shared module appears once per cache that compiled it;
+  ## callers dedupe by match.
+  let base = lspCacheRoot(cfg)
+  if dirExists(base):
+    for sub in walkDirs(base / "*"):
+      for f in walkFiles(sub / "*.s.nif"):
+        yield f
+
 proc buildArgs(cfg: Config; sub, file, nimcache: string; track: seq[string]): seq[string] =
   result = @[sub]
   if nimcache.len > 0:

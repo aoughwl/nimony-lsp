@@ -86,7 +86,7 @@ proc firstStmtsFile(nifPath: string): string =
 proc findSNif(cfg: Config; file: string): string =
   ## Absolute path to the `.s.nif` whose module body is `file`, or "".
   result = ""
-  let dir = nimcacheDir(cfg)
+  let dir = nimonycli.moduleCacheDir(cfg, file)
   if not dirExists(dir): return ""
   let rel = relFileFor(cfg, file)
   for f in walkFiles(dir / "*.s.nif"):
@@ -224,9 +224,7 @@ proc supertypes*(cfg: Config; item: TypeHierarchyItem): seq[TypeHierarchyItem] =
         result.add mkItem(tr.name, tr.rng, item.uri)
         return result
     # Otherwise search every module's `.s.nif` for the base type's own decl.
-    let dir = nimcacheDir(cfg)
-    if not dirExists(dir): return result
-    for f in walkFiles(dir / "*.s.nif"):
+    for f in nimonycli.allSNif(cfg):
       try:
         var b2 = loadBuf(f)
         for tr in collectTypeDecls(b2):
@@ -243,10 +241,8 @@ proc supertypes*(cfg: Config; item: TypeHierarchyItem): seq[TypeHierarchyItem] =
 proc subtypes*(cfg: Config; item: TypeHierarchyItem): seq[TypeHierarchyItem] =
   result = @[]
   try:
-    let dir = nimcacheDir(cfg)
-    if not dirExists(dir): return result
     const Cap = 200
-    for f in walkFiles(dir / "*.s.nif"):
+    for f in nimonycli.allSNif(cfg):
       if result.len >= Cap: break
       var uri = ""
       try:
