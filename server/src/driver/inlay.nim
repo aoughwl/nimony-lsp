@@ -142,6 +142,29 @@ proc alreadyAnnotated(doc: Document; namePos: Position): bool =
   if stop <= namePos.character: return false
   result = line.find(':', namePos.character, stop - 1) >= 0
 
+proc isIdentChar(c: char): bool =
+  c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+
+proc validTypeHintPos(doc: Document; pos: Position): bool =
+  ## A `: Type` hint is trustworthy only when it sits immediately after the
+  ## declared identifier on a real `let`/`var`/`const` line. The semchecked NIF
+  ## also carries compiler-SYNTHESIZED decls (loop temps, `result`, lowered
+  ## statements, module symbols) whose line-info points at arbitrary source
+  ## tokens — a comment, the middle of an `import` word, an `inc`/call — which
+  ## would otherwise scatter bogus (and mistyped) `: int` hints everywhere.
+  let line = doc.lineText(pos.line)
+  if pos.character <= 0 or pos.character > line.len: return false
+  # Must land exactly at the end of an identifier: prev char ends a name, and
+  # the char at pos does not continue one (kills mid-token / trailing-space).
+  if not isIdentChar(line[pos.character - 1]): return false
+  if pos.character < line.len and isIdentChar(line[pos.character]): return false
+  let s = line.strip()
+  if s.len == 0 or s[0] == '#': return false              # comment / blank
+  # The line must actually introduce a binding with the keyword present, so a
+  # bare `result = x` or a call is never decorated.
+  result = s.startsWith("let ") or s.startsWith("var ") or s.startsWith("const ") or
+           s.startsWith("let\t") or s.startsWith("var\t") or s.startsWith("const\t")
+
 proc inlayHints*(cfg: Config; doc: Document; rng: Range): seq[InlayHint] =
   result = @[]
   var seen = initHashSet[(int, int)]()
@@ -183,7 +206,8 @@ proc inlayHints*(cfg: Config; doc: Document; rng: Range): seq[InlayHint] =
               let typeName = renderType(d)
               if typeName.len > 0:
                 let (pos, ok) = endPosFor(symInfo, nm.len)
-                if ok and pos.line >= rng.start.line and pos.line <= rng.`end`.line:
+                if ok and pos.line >= rng.start.line and pos.line <= rng.`end`.line and
+                   validTypeHintPos(doc, pos):
                   if not alreadyAnnotated(doc, pos):
                     let key = (pos.line, pos.character)
                     if key notin seen:
