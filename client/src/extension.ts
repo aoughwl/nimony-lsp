@@ -12,6 +12,19 @@ import {
 let client: LanguageClient | undefined;
 let statusBarItem: vscode.StatusBarItem;
 
+// Serialize server lifecycle transitions. VS Code delivers restart and
+// config-change events as independent async callbacks; without serialization a
+// second event can call startClient() while the first stopClient() is still
+// awaiting the old server's shutdown, spawning a NEW server before the old one
+// exits — several overlapping servers then compile into one shared nimcache and
+// thrash it. Chaining every stop→start through one promise caps concurrent
+// servers at one.
+let lifecycleChain: Promise<void> = Promise.resolve();
+function serializeLifecycle(op: () => Promise<void>): Promise<void> {
+  lifecycleChain = lifecycleChain.then(op, op);
+  return lifecycleChain;
+}
+
 /**
  * Absolute fallback path to the server binary, matching the checked-in repo
  * layout described in ARCHITECTURE.md (`server/bin/nimony-lsp`).
@@ -190,8 +203,10 @@ export async function activate(
   // Restart command: full stop + start with a freshly resolved config.
   context.subscriptions.push(
     vscode.commands.registerCommand("nimony.restartServer", async () => {
-      await stopClient();
-      await startClient(context);
+      await serializeLifecycle(async () => {
+        await stopClient();
+        await startClient(context);
+      });
       vscode.window.setStatusBarMessage("Nimony: language server restarted", 3000);
     })
   );
@@ -230,13 +245,15 @@ export async function activate(
         e.affectsConfiguration("nimony.extraPaths") ||
         e.affectsConfiguration("nimony.daemonPath")
       ) {
-        await stopClient();
-        await startClient(context);
+        await serializeLifecycle(async () => {
+          await stopClient();
+          await startClient(context);
+        });
       }
     })
   );
 
-  await startClient(context);
+  await serializeLifecycle(() => startClient(context));
 }
 
 export async function deactivate(): Promise<void> {
