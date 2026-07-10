@@ -4,7 +4,7 @@
 ## response. Feature handlers live in `features/` and the `driver/` layer; this
 ## module owns lifecycle + document synchronization and routes requests.
 
-import std/[json, options, os, tables, sets]
+import std/[json, options, os, tables, sets, strutils]
 from std/posix import poll, TPollfd, Tnfds, POLLIN
 import lsp/[jsonrpc, protocol, uris]
 import server/[state, documents]
@@ -432,7 +432,18 @@ proc handleDidClose(params: JsonNode) =
   bumpCheckGeneration()
   let uri = textDocumentUri(params)
   pendingLive.excl uri
+  pendingWarm.excl uri
   cleanupLiveTemp(uri)
+  # Reclaim this file's per-file nimcache so nimcache/lsp/ doesn't grow unbounded
+  # over a session. A reopen pays one cold compile to re-warm — acceptable. Guard
+  # the path so we only ever remove inside nimcache/lsp/.
+  try:
+    let path = filePath(uri)
+    if path.len > 0:
+      let dir = nimonycli.moduleCacheDir(gState.config, path)
+      if "/nimcache/lsp/" in dir.replace("\\", "/") and dirExists(dir):
+        removeDir(dir)
+  except CatchableError: discard
   gState.closeDoc(uri)
 
 # --------------------------------------------------------------------------

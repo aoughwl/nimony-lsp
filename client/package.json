@@ -60,6 +60,10 @@
       {
         "command": "nimony.run.file",
         "title": "Nimony: Run File"
+      },
+      {
+        "command": "nimony.clearCache",
+        "title": "Nimony: Clear Compile Cache & Restart Server"
       }
     ],
     "configuration": {

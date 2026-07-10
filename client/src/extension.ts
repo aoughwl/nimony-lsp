@@ -235,6 +235,37 @@ export async function activate(
     })
   );
 
+  // Clear the LSP's per-file compile caches and restart — a self-heal button if
+  // a nimcache ever gets into a bad state. Removes only the LSP's own dirs
+  // (`nimcache/lsp`, `.nimlsp_livecache`), never the user's `nimony c` cache.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("nimony.clearCache", async () => {
+      const folders = vscode.workspace.workspaceFolders ?? [];
+      let removed = 0;
+      for (const f of folders) {
+        for (const sub of ["nimcache/lsp", ".nimlsp_livecache"]) {
+          const dir = path.join(f.uri.fsPath, sub);
+          try {
+            if (fs.existsSync(dir)) {
+              fs.rmSync(dir, { recursive: true, force: true });
+              removed++;
+            }
+          } catch {
+            // ignore; best effort
+          }
+        }
+      }
+      await serializeLifecycle(async () => {
+        await stopClient();
+        await startClient(context);
+      });
+      vscode.window.setStatusBarMessage(
+        `Nimony: cleared ${removed} cache dir(s), server restarted`,
+        3000
+      );
+    })
+  );
+
   // Restart automatically when relevant settings change so the new
   // serverPath / nimonyPath / extraPaths take effect.
   context.subscriptions.push(
