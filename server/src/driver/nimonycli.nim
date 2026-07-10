@@ -66,8 +66,26 @@ proc canonFile*(cfg: Config; file: string): string =
 proc cacheKey(sub, file: string; track: seq[string]): string =
   $checkGeneration & "\x1f" & sub & "\x1f" & file & "\x1f" & track.join("\x1f")
 
-proc buildArgs(cfg: Config; sub: string; file: string; track: seq[string]): seq[string] =
+proc lspCacheDir(cfg: Config; canonName: string): string =
+  ## A dedicated nimcache PER main module. The LSP checks every open file as its
+  ## own main module; nimony writes different artifacts for a module compiled as
+  ## `--isMain` vs. as a dependency, so several main modules sharing ONE nimcache
+  ## overwrite each other's artifacts and NONE of them ever warm again (every
+  ## check stays a full ~1.3s recompile — the "Loading forever / typing does
+  ## nothing" disease). Isolating each file's cache lets each stay warm (~0.00s
+  ## after one cold compile). Lives under `nimcache/lsp/` so it never collides
+  ## with the user's own `nimony c` build cache.
+  let root = if cfg.projectRoot.len > 0 and dirExists(cfg.projectRoot): cfg.projectRoot
+             else: parentDir(canonName)
+  var key = canonName
+  for ch in ["/", "\\", ":", " "]: key = key.replace(ch, "_")
+  if key.len == 0: key = "main"
+  root / "nimcache" / "lsp" / key
+
+proc buildArgs(cfg: Config; sub, file, nimcache: string; track: seq[string]): seq[string] =
   result = @[sub]
+  if nimcache.len > 0:
+    result.add("--nimcache:" & nimcache)
   for p in cfg.extraPaths:
     result.add("--path:" & p)
   for t in track:
@@ -77,7 +95,8 @@ proc buildArgs(cfg: Config; sub: string; file: string; track: seq[string]): seq[
 proc runUncached(cfg: Config; sub: string; file: string; track: seq[string]): CheckResult =
   if cfg.nimonyExe.len == 0 or not fileExists(cfg.nimonyExe):
     return CheckResult(output: "", exitCode: 127)
-  let args = buildArgs(cfg, sub, file, track)
+  # `file` is already canonicalized by run(); give it its own per-module cache.
+  let args = buildArgs(cfg, sub, file, lspCacheDir(cfg, file), track)
   let workdir = if cfg.projectRoot.len > 0 and dirExists(cfg.projectRoot): cfg.projectRoot
                 else: parentDir(file)
   var p: Process
