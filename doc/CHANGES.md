@@ -22,6 +22,8 @@ just by tests).
 | Run file (F6) | `nimony.run.file` / F6 runs `nimony c -r` on the active file in a reused "Nimony Run" terminal | `dcabad8` |
 | `$/cancelRequest` | a background request the client abandoned (cursor moved on) is dropped and answered Cancelled | `48baee2` |
 | Crash-resilience | a handler exception becomes an error response and a malformed JSON frame is absorbed — neither can take the server down | `d998176` |
+| Per-file cache reclaimed on close | closing a file removes its `nimcache/lsp/<file>` dir so the per-file caches don't grow unbounded over a session (a reopen re-warms once) | `4ee9d69` |
+| Self-heal command | "Nimony: Clear Compile Cache & Restart Server" wipes the LSP's own caches (`nimcache/lsp`, `.nimlsp_livecache`) and restarts — recover from a bad cache state without hand-wiping dirs | `4ee9d69` |
 
 ---
 
