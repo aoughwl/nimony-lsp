@@ -1,15 +1,8 @@
-# nimony-lsp
+# nim2-nimony-lsp
 
-A [Language Server Protocol](https://microsoft.github.io/language-server-protocol/)
-implementation for **[Nimony](https://github.com/nim-lang/nimony)**, plus a full
-VSCode extension. Built directly on Nimony's own `idetools` and NIF libraries — one
-statically linked binary speaking JSON-RPC over stdio.
+The original **Nim 2** `nimony-lsp`. Complete and fully featured.
 
-**📖 Full docs → [aoughwl.github.io/docs/nimony-lsp](https://aoughwl.github.io/docs/nimony-lsp)**
+Everything else — including the current, actively-developed Language Server
+(**aowllsp**, written in Nimony) — lives on the site:
 
-- Diagnostics from `nimony check`; go-to-def / references from `idetools`.
-- Outline, hover, completion by reading typed `.s.nif` / `.s.idx.nif` **in-process**
-  — not a regex approximation of the source.
-- TextMate grammar (`source.nimony`) shipped with the extension.
-
-See the docs for build, editor setup, configuration, and coordinate conventions.
+→ https://aoughwl.github.io
